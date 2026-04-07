@@ -1,0 +1,15 @@
+sentinella2-scan:
+  stage: test
+  image: golang:1.23-alpine
+  before_script:
+    - wget -q https://github.com/perseworks/sentinella2/releases/latest/download/sentinella2-linux-amd64 -O /usr/local/bin/sentinella2
+    - chmod +x /usr/local/bin/sentinella2
+  script:
+    - sentinella2 scan . --format json > scan-results.json
+    - >
+      if [ "$(jq '.summary.critical + .summary.high' scan-results.json)" -gt 0 ]; then
+        echo "Security issues found"; jq '.findings[]' scan-results.json; exit 1;
+      fi
+  artifacts:
+    paths: [scan-results.json]
+    when: always

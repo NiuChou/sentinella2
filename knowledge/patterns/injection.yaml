@@ -1,0 +1,207 @@
+# Pattern Category: Injection Vectors
+# Covers command injection, URL injection (SSRF), and content injection (XSS).
+# Source: perseworks 93-vulnerability audit.
+
+schema_version: "1.0"
+kind: Pattern
+category: injection
+
+patterns:
+  - id: "injection/command-injection"
+    name: "Command Injection"
+    description: "User input passed to OS command execution without sanitization"
+    severity: CRITICAL
+    owasp: ["A03"]
+    cases: ["M-ffmpeg"]
+
+    detection:
+      abstract: >
+        Detects user-controlled input flowing into OS command execution functions.
+        Attackers can append shell metacharacters (;, |, &&, $()) to inject
+        arbitrary commands. Especially dangerous when shell=True or string
+        concatenation is used to build command strings.
+      tier: 2
+      rules:
+        go:
+          pattern: 'exec\.Command\(.*(req\.|params\.|query\.|input|user|arg)'
+          negative_pattern: 'exec\.CommandContext\(\s*ctx\s*,\s*"[^"]+"\s*\)'
+          context: "**/*.go"
+        typescript:
+          pattern: 'child_process\.(exec|execSync)\s*\([^)]*(\+|`.*\$\{)'
+          negative_pattern: 'child_process\.execFile\s*\(\s*"[^"]+"\s*,\s*\['
+          context: "**/*.ts"
+        python:
+          pattern: '(subprocess\.(call|run|Popen)\(.*shell\s*=\s*True|os\.system\()'
+          negative_pattern: 'subprocess\.(call|run)\(\[.*\],\s*shell\s*=\s*False'
+          context: "**/*.py"
+      false_positive_hints:
+        - "exec.Command with only hardcoded string literals is safe"
+        - "execFile with array arguments (no shell) is safe"
+        - "shlex.quote() or shellescape wrapping mitigates the risk"
+
+    fix:
+      abstract: >
+        Never pass user input directly to shell commands. Use parameterized
+        command execution (array of arguments, not shell string). Validate
+        and allowlist input values. Use exec.Command/execFile with explicit
+        argument arrays instead of shell string interpolation.
+      templates:
+        go: |
+          // SAFE: use argument array, never shell string
+          cmd := exec.CommandContext(ctx, "/usr/bin/ffmpeg",
+              "-i", inputPath,
+              "-vf", "scale=640:480",
+              outputPath,
+          )
+          cmd.Stdout = &stdout
+          cmd.Stderr = &stderr
+          if err := cmd.Run(); err != nil {
+              return fmt.Errorf("ffmpeg failed: %w", err)
+          }
+        typescript: |
+          // SAFE: use execFile with argument array
+          import { execFile } from 'child_process';
+          execFile('/usr/bin/ffmpeg', ['-i', inputPath, '-vf', 'scale=640:480', outputPath],
+            (error, stdout, stderr) => {
+              if (error) { throw new Error(`ffmpeg failed: ${error.message}`); }
+            }
+          );
+        python: |
+          # SAFE: use list form, shell=False (default)
+          import subprocess
+          result = subprocess.run(
+              ["/usr/bin/ffmpeg", "-i", input_path, "-vf", "scale=640:480", output_path],
+              capture_output=True, check=True,
+          )
+
+  - id: "injection/url-injection"
+    name: "URL Injection / SSRF"
+    description: "User input used to construct URLs without validation, enabling SSRF"
+    severity: HIGH
+    owasp: ["A10"]
+    cases: ["M-sms-url"]
+
+    detection:
+      abstract: >
+        Detects URL construction from user-controlled input without allowlist
+        validation. Attackers can redirect requests to internal services
+        (169.254.169.254, localhost, internal DNS) to exfiltrate metadata,
+        access internal APIs, or scan internal networks.
+      tier: 2
+      rules:
+        go:
+          pattern: '(http\.(Get|Post|Do)\(.*(\+|fmt\.Sprintf)|url\.Parse\(.*(?:req\.|params\.|input|user))'
+          negative_pattern: 'url\.Parse\(.*allowedHosts|validURL\(|isAllowedHost\('
+          context: "**/*.go"
+        typescript:
+          pattern: '(fetch|axios\.(get|post))\s*\([^)]*(\+|`.*\$\{.*(?:req|params|query|input|user))'
+          negative_pattern: 'allowedUrls\.|isAllowedUrl\(|URL_ALLOWLIST'
+          context: "**/*.ts"
+        python:
+          pattern: 'requests\.(get|post)\(.*(?:request\.|params\.|input|user)'
+          negative_pattern: 'validate_url\(|ALLOWED_HOSTS|urlparse.*\.netloc\s*in'
+          context: "**/*.py"
+      false_positive_hints:
+        - "URLs constructed purely from config/constants are safe"
+        - "URLs validated against an explicit allowlist are mitigated"
+        - "Internal-only services behind network policy may be lower risk"
+
+    fix:
+      abstract: >
+        Validate all user-supplied URLs against an explicit allowlist of
+        permitted hosts and schemes. Resolve DNS and verify the IP is not
+        in private ranges (RFC 1918, link-local). Reject file://, gopher://,
+        and other dangerous schemes. Use a dedicated SSRF-safe HTTP client.
+      templates:
+        go: |
+          // SAFE: validate URL against allowlist before fetching
+          func safeFetch(rawURL string, allowedHosts []string) (*http.Response, error) {
+              parsed, err := url.Parse(rawURL)
+              if err != nil {
+                  return nil, fmt.Errorf("invalid URL: %w", err)
+              }
+              if parsed.Scheme != "https" {
+                  return nil, fmt.Errorf("only HTTPS allowed")
+              }
+              if !slices.Contains(allowedHosts, parsed.Hostname()) {
+                  return nil, fmt.Errorf("host %q not in allowlist", parsed.Hostname())
+              }
+              // Resolve and check IP is not private
+              ips, err := net.LookupIP(parsed.Hostname())
+              if err != nil {
+                  return nil, fmt.Errorf("DNS resolution failed: %w", err)
+              }
+              for _, ip := range ips {
+                  if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+                      return nil, fmt.Errorf("resolved IP %s is not allowed", ip)
+                  }
+              }
+              return http.Get(rawURL)
+          }
+        typescript: |
+          // SAFE: validate URL against allowlist
+          const ALLOWED_HOSTS = new Set(['api.example.com', 'cdn.example.com']);
+          function safeFetch(rawUrl: string): Promise<Response> {
+            const parsed = new URL(rawUrl);
+            if (parsed.protocol !== 'https:') {
+              throw new Error('Only HTTPS allowed');
+            }
+            if (!ALLOWED_HOSTS.has(parsed.hostname)) {
+              throw new Error(`Host ${parsed.hostname} not in allowlist`);
+            }
+            return fetch(rawUrl);
+          }
+
+  - id: "injection/content-injection"
+    name: "Content Injection / XSS"
+    description: "User content rendered without sanitization, enabling cross-site scripting"
+    severity: HIGH
+    owasp: ["A03"]
+    cases: ["M-notify"]
+
+    detection:
+      abstract: >
+        Detects user-controlled content being rendered into HTML without
+        sanitization. Attackers can inject malicious scripts via innerHTML,
+        dangerouslySetInnerHTML, or Go template.HTML() casting. This enables
+        session hijacking, credential theft, and phishing.
+      tier: 1
+      rules:
+        typescript:
+          pattern: '(innerHTML\s*=|dangerouslySetInnerHTML\s*=\s*\{)'
+          negative_pattern: 'DOMPurify\.sanitize\(|sanitizeHtml\(|xss\('
+          context: "**/*.{ts,tsx,js,jsx}"
+        go:
+          pattern: 'template\.HTML\(.*(?:req\.|params\.|input|user|body)'
+          negative_pattern: 'bluemonday\.|sanitize\(|policy\.Sanitize\('
+          context: "**/*.go"
+        python:
+          pattern: '(Markup\(|mark_safe\().*(?:request\.|input|user)'
+          negative_pattern: 'bleach\.clean\(|escape\('
+          context: "**/*.py"
+      false_positive_hints:
+        - "Static HTML strings without user input are safe"
+        - "Content sanitized by DOMPurify, bluemonday, or bleach is mitigated"
+        - "Text-only rendering (textContent, not innerHTML) is safe"
+
+    fix:
+      abstract: >
+        Never render user input as raw HTML. Use text interpolation by default.
+        When rich HTML is required, sanitize with a battle-tested library
+        (DOMPurify for JS, bluemonday for Go, bleach for Python). Implement
+        Content-Security-Policy headers to limit script execution.
+      templates:
+        typescript: |
+          // SAFE: sanitize before rendering
+          import DOMPurify from 'dompurify';
+          const clean = DOMPurify.sanitize(userContent);
+          element.innerHTML = clean;
+
+          // SAFER: use textContent when HTML is not needed
+          element.textContent = userContent;
+        go: |
+          // SAFE: sanitize with bluemonday before rendering
+          import "github.com/microcosm-cc/bluemonday"
+          p := bluemonday.UGCPolicy()
+          safe := p.Sanitize(userInput)
+          // Use safe string in template

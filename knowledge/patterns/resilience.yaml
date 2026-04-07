@@ -1,0 +1,335 @@
+# Security Control Resilience Patterns
+# Category: resilience
+# Detects degradation, bypass, or silent failure of security controls.
+# Source: perseworks 93-vulnerability audit + FreeBSD SA-25:07 analysis.
+
+schema_version: "1.0"
+kind: PatternFile
+category: resilience
+
+patterns:
+  - id: "resilience/fail-open-middleware"
+    name: "Fail-Open Security Middleware"
+    description: "Security middleware defaults to allow when the backing service or check fails"
+    severity: CRITICAL
+    owasp: ["A07"]
+    freebsd_sa: ["SA-25:07"]
+    detection:
+      abstract: >
+        Identify security middleware (auth, rate limiting, WAF) that calls
+        the next handler or returns success when an error occurs. This turns
+        any infrastructure failure (Redis down, auth service timeout) into
+        a complete security bypass. The FreeBSD SA-25:07 analog: blocklistd
+        leaked file descriptors causing the block list to fail open.
+      tier: 2
+      rules:
+        go:
+          pattern: 'func\s+\w*[Mm]iddleware.*\{[^}]*if\s+err\s*!=\s*nil[^}]*c\.Next\(\)|func\s+\w*[Aa]uth.*\{[^}]*if\s+err\s*!=\s*nil[^}]*c\.Next\(\)'
+          negative_pattern: 'c\.Abort\w*\(|c\.AbortWithStatus\(|return\s+c\.NoContent\(4|return\s+echo\.ErrUnauthorized'
+          context: "**/*.go — Middleware files, auth interceptors, security handlers"
+        typescript:
+          pattern: 'catch\s*\(\w*\)\s*\{[^}]*next\(\s*\)|\.catch\(\s*(?:err\s*=>|function)\s*\{[^}]*next\(\s*\)'
+          negative_pattern: 'next\(err\)|next\(new\s+\w*Error|res\.status\(40[13]\)|throw\s+new'
+          context: "**/*.ts — Express/Koa middleware, auth interceptors"
+        python:
+          pattern: 'except\s*(?:\w+\s*)?:\s*\n\s*(?:pass|return\s+None|continue)|except.*:\s*\n\s*return\s+await\s+call_next'
+          negative_pattern: 'except.*:\s*\n\s*(?:raise|return\s+JSONResponse.*status_code=40|abort\(40)'
+          context: "**/*.py — Django/Flask/FastAPI middleware, auth decorators"
+      false_positive_hints:
+        - "Non-security middleware (logging, tracing, metrics) that should not block"
+        - "Middleware that catches the error, logs it, AND aborts in the same block"
+        - "Graceful degradation middleware for optional features (not security)"
+    fix:
+      abstract: >
+        All security middleware must follow the fail-closed pattern. When
+        any dependency is unavailable or any check raises an error, deny
+        the request with an appropriate HTTP status. Log the error for
+        operational visibility but never pass the request through.
+      templates:
+        go: |
+          func AuthMiddleware(authClient AuthClient) gin.HandlerFunc {
+              return func(c *gin.Context) {
+                  token := c.GetHeader("Authorization")
+                  if token == "" {
+                      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                          "error": "missing authorization header",
+                      })
+                      return
+                  }
+
+                  user, err := authClient.Verify(c.Request.Context(), token)
+                  if err != nil {
+                      // Fail-closed: deny on ANY error
+                      log.Error("auth verification failed", zap.Error(err))
+                      c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+                          "error": "authentication service unavailable",
+                      })
+                      return
+                  }
+
+                  c.Set("user", user)
+                  c.Next()
+              }
+          }
+        typescript: |
+          export function authMiddleware(authClient: AuthClient) {
+            return async (req: Request, res: Response, next: NextFunction) => {
+              const token = req.headers.authorization;
+              if (!token) {
+                return res.status(401).json({ error: 'Missing authorization' });
+              }
+
+              try {
+                const user = await authClient.verify(token);
+                req.user = user;
+                next();
+              } catch (err) {
+                // Fail-closed: deny on ANY error
+                console.error('Auth verification failed:', err);
+                res.status(503).json({ error: 'Authentication service unavailable' });
+              }
+            };
+          }
+    cases: ["H5", "H7"]
+
+  - id: "resilience/unenforced-limit"
+    name: "Unenforced Rate Limit or Quota"
+    description: "Rate limit or quota is configured but not actually enforced by the request pipeline"
+    severity: HIGH
+    owasp: ["A04"]
+    freebsd_sa: ["SA-25:07"]
+    detection:
+      abstract: >
+        Identify rate limit or quota configurations that exist in the
+        database, config files, or environment variables but are never
+        consumed by the middleware or request pipeline. The configuration
+        creates a false sense of security while requests flow unrestricted.
+        The FreeBSD SA-25:07 analog: blocklistd tracked offenders but
+        leaked FDs, so the block rules were never applied to new connections.
+      tier: 3
+      rules:
+        go:
+          pattern: 'RateLimit|rateLimiter|quota|MaxRequests|requestsPerSecond'
+          negative_pattern: 'limiter\.Allow\(\)|limiter\.Wait\(|rateLimiter\.Take\(|middleware\.RateLimit|tollbooth'
+          context: "**/*.go — Config structs, middleware registration, router setup"
+        typescript:
+          pattern: 'rateLimit|rateLimiter|quota|maxRequests|requestsPerSecond'
+          negative_pattern: 'express-rate-limit|rateLimit\(\{|limiter\.consume\(|rateLimiter\.middleware'
+          context: "**/*.ts — Config files, middleware setup, app initialization"
+        python:
+          pattern: 'RATE_LIMIT|rate_limit|quota|max_requests|requests_per_second'
+          negative_pattern: 'slowapi|flask_limiter|@limiter\.limit|RateLimitMiddleware|throttle_classes'
+          context: "**/*.py — Settings, middleware config, Django REST throttle"
+      false_positive_hints:
+        - "Rate limit configs in test fixtures"
+        - "Config values consumed by an external gateway (API gateway, CDN)"
+        - "Rate limit values stored for display purposes in admin dashboards"
+    fix:
+      abstract: >
+        Verify that every rate limit configuration is consumed by
+        middleware that actually denies requests when the limit is
+        exceeded. Add integration tests that confirm requests are
+        rejected after the limit is hit. Monitor rate limit rejections
+        in production to verify enforcement.
+      templates:
+        go: |
+          // Ensure rate limiter is both configured AND enforced
+          limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RequestsPerSecond), cfg.RateLimit.Burst)
+
+          func RateLimitMiddleware(limiter *rate.Limiter) gin.HandlerFunc {
+              return func(c *gin.Context) {
+                  if !limiter.Allow() {
+                      c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+                          "error": "rate limit exceeded",
+                          "retry_after": limiter.Reserve().Delay().Seconds(),
+                      })
+                      return
+                  }
+                  c.Next()
+              }
+          }
+
+          // Register on router — not just in config
+          r.Use(RateLimitMiddleware(limiter))
+        typescript: |
+          import rateLimit from 'express-rate-limit';
+
+          // Config AND enforcement in one step
+          const limiter = rateLimit({
+            windowMs: config.rateLimit.windowMs,
+            max: config.rateLimit.maxRequests,
+            standardHeaders: true,
+            legacyHeaders: false,
+            handler: (_req, res) => {
+              res.status(429).json({ error: 'Rate limit exceeded' });
+            },
+          });
+
+          // Actually register it
+          app.use('/api', limiter);
+    cases: ["H5"]
+
+  - id: "resilience/audit-drop"
+    name: "Silent Audit Log Drop"
+    description: "Security audit log entries silently discarded when the log sink encounters an error"
+    severity: HIGH
+    owasp: ["A09"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify audit or security log writes where the error return is
+        ignored, or where asynchronous log shipping has no retry or dead
+        letter mechanism. Lost audit logs mean security incidents cannot
+        be investigated and compliance requirements are violated.
+      tier: 3
+      rules:
+        go:
+          pattern: 'auditLog\.Write\(|audit\.Log\(|securityLog\.|\.Info\("audit|\.Warn\("security'
+          negative_pattern: 'if\s+err\s*:?=\s*audit.*;\s*err\s*!=\s*nil|auditLog\.MustWrite|audit.*retry|audit.*fallback'
+          context: "**/*.go — Audit logging, security event recording, compliance logging"
+        typescript:
+          pattern: 'auditLog\.|securityLog\.|audit\.log\(|logger\.audit\('
+          negative_pattern: 'await\s+audit.*\.catch|audit.*retry|audit.*fallback|auditLog.*then.*catch'
+          context: "**/*.ts — Audit log services, security event handlers"
+        python:
+          pattern: 'audit_log\.|security_log\.|log_audit_event|audit\.info\('
+          negative_pattern: 'try.*audit.*except.*retry|audit.*fallback|audit_log.*raise'
+          context: "**/*.py — Audit logging modules, security event handlers"
+      false_positive_hints:
+        - "Application-level debug logs (not security audit logs)"
+        - "Audit logs writing to stdout/stderr in containerized environments (captured by infra)"
+        - "Audit systems with a separate monitoring check on log pipeline health"
+    fix:
+      abstract: >
+        Audit log writes must either succeed or trigger an alert. Implement
+        a fallback mechanism: if the primary log sink fails, write to a
+        local buffer, secondary sink, or stderr. Never silently discard
+        security-relevant events. Add monitoring on audit pipeline health.
+      templates:
+        go: |
+          func (a *AuditLogger) Log(ctx context.Context, event AuditEvent) error {
+              data, err := json.Marshal(event)
+              if err != nil {
+                  return fmt.Errorf("audit marshal: %w", err)
+              }
+
+              if err := a.primary.Write(ctx, data); err != nil {
+                  // Fallback: write to local file and alert
+                  a.metrics.IncrCounter("audit.primary_failure", 1)
+                  if fallbackErr := a.fallback.Write(ctx, data); fallbackErr != nil {
+                      // Last resort: stderr (captured by container runtime)
+                      fmt.Fprintf(os.Stderr, "AUDIT_CRITICAL: %s\n", string(data))
+                      return fmt.Errorf("audit write failed (primary: %w, fallback: %v)", err, fallbackErr)
+                  }
+              }
+              return nil
+          }
+        typescript: |
+          async function logAuditEvent(event: AuditEvent): Promise<void> {
+            try {
+              await primaryAuditSink.write(event);
+            } catch (primaryErr) {
+              metrics.increment('audit.primary_failure');
+              try {
+                await fallbackAuditSink.write(event);
+              } catch (fallbackErr) {
+                // Last resort: stderr
+                console.error('AUDIT_CRITICAL:', JSON.stringify(event));
+                throw new AuditWriteError(primaryErr, fallbackErr);
+              }
+            }
+          }
+    cases: ["M-audit"]
+
+  - id: "resilience/resource-leak"
+    name: "Resource Leak Degrading Security Controls"
+    description: "Leaked goroutines, connections, or file descriptors cause security control degradation over time"
+    severity: HIGH
+    owasp: ["A04"]
+    freebsd_sa: ["SA-25:07"]
+    detection:
+      abstract: >
+        Identify resource leaks (goroutines, database connections, file
+        descriptors, HTTP connections) that accumulate over time and
+        eventually cause security controls to fail. When the connection
+        pool is exhausted, auth checks time out and may fail open. The
+        FreeBSD SA-25:07 analog: blocklistd leaked file descriptors until
+        it could no longer open sockets to enforce blocks.
+      tier: 2
+      rules:
+        go:
+          pattern: 'go\s+func\s*\(|go\s+\w+\(|time\.NewTicker\(|time\.NewTimer\('
+          negative_pattern: 'context\.WithCancel|context\.WithTimeout|<-ctx\.Done\(\)|<-done|defer\s+\w+\.Stop\(\)'
+          context: "**/*.go — Background workers, event handlers, connection managers"
+        typescript:
+          pattern: 'setInterval\(|setTimeout\(|new\s+EventEmitter|\.on\('
+          negative_pattern: 'clearInterval\(|clearTimeout\(|\.removeListener\(|\.off\(|AbortController|signal'
+          context: "**/*.ts — Background tasks, event listeners, connection pools"
+        python:
+          pattern: 'threading\.Thread\(|asyncio\.create_task\(|pool\.submit\(|Thread\(target='
+          negative_parameter: 'daemon=True|\.join\(\)|\.cancel\(\)|shutdown\(wait=|atexit\.register'
+          context: "**/*.py — Background threads, async tasks, resource pools"
+      false_positive_hints:
+        - "Goroutines with proper context cancellation and done channels"
+        - "Long-lived goroutines that are intentionally permanent (main event loop)"
+        - "Timers that are deferred-stopped in the same function scope"
+        - "Test code that uses short-lived goroutines in controlled scenarios"
+    fix:
+      abstract: >
+        Every goroutine must have a cancellation mechanism (context or done
+        channel). Every timer and ticker must be stopped. Every connection
+        must be returned to the pool or closed. Add resource monitoring that
+        alerts when counts exceed expected baselines.
+      templates:
+        go: |
+          // Before: goroutine leak — no way to stop
+          // go func() {
+          //     for {
+          //         processQueue()
+          //         time.Sleep(time.Second)
+          //     }
+          // }()
+
+          // After: cancellable goroutine with proper cleanup
+          func startWorker(ctx context.Context) {
+              ticker := time.NewTicker(time.Second)
+              defer ticker.Stop()
+
+              for {
+                  select {
+                  case <-ctx.Done():
+                      log.Info("worker shutting down")
+                      return
+                  case <-ticker.C:
+                      if err := processQueue(ctx); err != nil {
+                          log.Error("queue processing failed", zap.Error(err))
+                      }
+                  }
+              }
+          }
+
+          // Launch with cancellation
+          ctx, cancel := context.WithCancel(context.Background())
+          defer cancel()
+          go startWorker(ctx)
+        typescript: |
+          // Before: interval leak
+          // setInterval(() => processQueue(), 1000);
+
+          // After: cancellable with AbortController
+          function startWorker(signal: AbortSignal): void {
+            const interval = setInterval(async () => {
+              if (signal.aborted) {
+                clearInterval(interval);
+                return;
+              }
+              await processQueue();
+            }, 1000);
+
+            signal.addEventListener('abort', () => clearInterval(interval));
+          }
+
+          const controller = new AbortController();
+          startWorker(controller.signal);
+          // To stop: controller.abort();
+    cases: ["M-goroutine"]

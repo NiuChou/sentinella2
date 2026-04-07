@@ -1,0 +1,498 @@
+# High Vulnerability Cases
+# Severity: HIGH (26 cases)
+# Source: perseworks full-platform security audit (93 vulnerabilities, 100% fixed)
+# Platform: altus-gateway (Go), altus-web (React/TS), Kubernetes deployment
+
+schema_version: "1.0"
+kind: CaseFile
+severity_filter: HIGH
+
+cases:
+  - id: "H1"
+    title: "Missing request body size limit on webhook endpoints"
+    severity: HIGH
+    pattern_ref: "input-boundary/missing-body-limit"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/router/webhook.go:23"
+    description: >
+      Webhook endpoint group registered without body size limit middleware.
+      Payment provider callbacks and third-party integrations accept arbitrarily
+      large request bodies, enabling memory exhaustion denial-of-service.
+    fix_summary: >
+      Add http.MaxBytesReader middleware to webhook route group with 1MB limit.
+      Return 413 Payload Too Large when exceeded.
+    lesson: >
+      Webhook endpoints are publicly accessible by design — they require the
+      same input validation as any user-facing endpoint, including body size limits.
+
+  - id: "H2"
+    title: "CSRF token not validated on state-changing POST endpoints"
+    severity: HIGH
+    pattern_ref: "auth-flow/csrf-missing"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/router/api.go:67"
+    description: >
+      State-changing POST endpoints for profile updates, payment initiation,
+      and settings changes lack CSRF token validation. Cookie-based session
+      authentication means browsers automatically attach credentials, enabling
+      cross-site request forgery attacks.
+    fix_summary: >
+      Implement CSRF middleware using gorilla/csrf for all cookie-authenticated
+      state-changing endpoints. Set SameSite=Strict on session cookies.
+    lesson: >
+      Any endpoint using cookie-based auth for state changes needs CSRF
+      protection — Bearer token APIs are exempt but cookie APIs are not.
+
+  - id: "H3"
+    title: "Rate limit bypass via API key rotation"
+    severity: HIGH
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/middleware/rate_limit.go:42"
+    description: >
+      Rate limiting keyed solely on API key. Users can rotate their API key
+      via the settings endpoint to reset the rate limit counter, effectively
+      bypassing all rate limiting. No IP-based fallback or composite key used.
+    fix_summary: >
+      Use composite rate limit key combining user ID, IP address, and API key.
+      Track rate limits by user ID as the primary dimension. Add separate
+      IP-based rate limiting as defense in depth.
+    lesson: >
+      Rate limit keys must be based on identity dimensions the user cannot
+      easily rotate — user ID and IP address, not just bearer credentials.
+
+  - id: "H4"
+    title: "Session token not invalidated on password change"
+    severity: HIGH
+    pattern_ref: "auth-flow/fail-open"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/auth/password_service.go:91"
+    description: >
+      Password change endpoint updates the password hash but does not invalidate
+      existing JWT tokens or sessions. A compromised session remains valid until
+      natural token expiry, which could be hours or days.
+    fix_summary: >
+      Increment a token generation counter in the user record on password change.
+      Validate the generation counter in JWT claims on every request. Reject
+      tokens issued before the password change.
+    lesson: >
+      Credential changes must invalidate all existing sessions — otherwise
+      the credential change is a false recovery action after account compromise.
+
+  - id: "H5"
+    title: "Rate limit configured in DB but not enforced by middleware"
+    severity: HIGH
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: "SA-25:07"
+    location: "altus-gateway/internal/config/rate_limits.go:18"
+    description: >
+      Rate limit thresholds defined in database configuration table and loaded
+      into the config struct, but the rate limit middleware is commented out in
+      the router setup. Configuration creates the illusion of protection while
+      requests flow unrestricted.
+    fix_summary: >
+      Uncomment and wire rate limit middleware into the router. Add integration
+      test that verifies requests are rejected after the limit is exceeded.
+    lesson: >
+      Configuration without enforcement is worse than no configuration — it
+      creates false confidence during security reviews and audits.
+
+  - id: "H6"
+    title: "Payment record IDOR — any user can view any payment by ID"
+    severity: HIGH
+    pattern_ref: "auth-flow/idor"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/handler/payment_handler.go:134"
+    description: >
+      GET /api/payments/:id endpoint retrieves payment by primary key without
+      verifying the requesting user owns the payment record. Any authenticated
+      user can enumerate payment IDs and view other users' payment details
+      including amounts, methods, and transaction references.
+    fix_summary: >
+      Add user_id filter to payment query: FindPaymentByIDAndUserID. Return
+      404 Not Found for both missing and unauthorized payments to prevent
+      enumeration.
+    lesson: >
+      Every resource lookup by ID must include an ownership check — either in
+      the query itself or immediately after retrieval, before any data is returned.
+
+  - id: "H7"
+    title: "Redis connection error causes auth middleware to fail-open"
+    severity: HIGH
+    pattern_ref: "resilience/fail-open-middleware"
+    freebsd_sa_ref: "SA-25:07"
+    location: "altus-gateway/internal/middleware/auth.go:67"
+    description: >
+      Auth middleware catches Redis connection errors when checking token
+      blacklist and calls c.Next() to pass the request through. When Redis
+      is down, all requests bypass authentication — a single infrastructure
+      failure disables all access control.
+    fix_summary: >
+      Change error handling to fail-closed: return 503 Service Unavailable
+      when Redis is unreachable. Add circuit breaker with health check endpoint.
+    lesson: >
+      Security middleware must always fail closed — infrastructure failures
+      should deny access, not grant it. Availability is preferable to compromise.
+
+  - id: "H8"
+    title: "Worker role can access manager-only endpoints"
+    severity: HIGH
+    pattern_ref: "auth-flow/permission-equivalent"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/middleware/role_check.go:28"
+    description: >
+      Manager endpoints check isAuthenticated instead of requiring the manager
+      role. Workers, pending users, and any authenticated account can access
+      team management, payroll, and reporting endpoints intended only for managers.
+    fix_summary: >
+      Replace isAuthenticated check with explicit role == 'manager' whitelist.
+      Implement RBAC middleware that maps endpoints to minimum required roles.
+    lesson: >
+      Authentication and authorization are distinct controls — confirming identity
+      is not the same as confirming permission. Every privileged endpoint needs
+      explicit role verification.
+
+  - id: "H9"
+    title: "File upload without content-type validation"
+    severity: HIGH
+    pattern_ref: "input-boundary/missing-upload-validation"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/handler/upload_handler.go:45"
+    description: >
+      Profile photo upload endpoint accepts any file type without validating
+      Content-Type or inspecting magic bytes. Attackers can upload executable
+      files, HTML files (stored XSS), or polyglot files that execute as scripts
+      when served.
+    fix_summary: >
+      Validate Content-Type against allowlist (image/jpeg, image/png, image/webp).
+      Verify magic bytes match declared Content-Type. Serve uploads with
+      Content-Disposition: attachment and X-Content-Type-Options: nosniff.
+    lesson: >
+      Never trust client-provided Content-Type headers — always verify file
+      content via magic byte inspection before accepting uploads.
+
+  - id: "H10"
+    title: "Goroutine leak in WebSocket handler"
+    severity: HIGH
+    pattern_ref: "resilience/resource-leak"
+    freebsd_sa_ref: "SA-25:07"
+    location: "altus-gateway/internal/handler/ws_handler.go:78"
+    description: >
+      WebSocket connection handler spawns a goroutine for each connection to
+      read messages but lacks context cancellation or timeout. When clients
+      disconnect ungracefully, the read goroutine blocks indefinitely. Over
+      time, leaked goroutines exhaust memory and degrade all services including
+      auth middleware.
+    fix_summary: >
+      Add context.WithTimeout to WebSocket read goroutines. Implement ping/pong
+      heartbeat with deadline. Defer connection close and context cancel in
+      the goroutine.
+    lesson: >
+      Every goroutine must have a termination condition — network-bound
+      goroutines are especially dangerous because remote peers control the
+      lifetime.
+
+  - id: "H11"
+    title: "SQL injection in search endpoint via unsanitized LIKE query"
+    severity: HIGH
+    pattern_ref: "injection/content-injection"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/repo/worker_repo.go:112"
+    description: >
+      Worker search endpoint concatenates user input directly into a SQL LIKE
+      clause without escaping wildcard characters or using parameterized queries.
+      Input like "% OR 1=1 --" can manipulate query logic to return all records
+      or extract data via error-based injection.
+    fix_summary: >
+      Use parameterized queries with placeholder binding for the LIKE pattern.
+      Escape SQL wildcard characters (%, _) in user input before binding.
+    lesson: >
+      LIKE clauses require both parameterized queries and wildcard escaping —
+      parameterization alone does not prevent wildcard manipulation.
+
+  - id: "H12"
+    title: "Missing TLS verification on internal service calls"
+    severity: HIGH
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/client/notification_client.go:34"
+    description: >
+      HTTP client for internal service communication configured with
+      InsecureSkipVerify: true. Internal services communicate over the cluster
+      network without TLS certificate validation, enabling man-in-the-middle
+      attacks from any compromised pod in the cluster.
+    fix_summary: >
+      Remove InsecureSkipVerify. Configure proper CA certificate bundle for
+      internal PKI. Use service mesh mTLS for zero-trust internal communication.
+    lesson: >
+      Internal network is not a trust boundary — lateral movement from a single
+      compromised service requires mTLS or equivalent verification between all
+      internal services.
+
+  - id: "H13"
+    title: "Excessive ServiceAccount permissions in K8s"
+    severity: HIGH
+    pattern_ref: "isolation/excessive-perms"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/rbac.yaml:12"
+    description: >
+      Application ServiceAccount bound to a ClusterRole with wildcard verbs on
+      all resources (verbs: ["*"], resources: ["*"]). A compromised pod can
+      read secrets, modify deployments, and escalate privileges across the
+      entire cluster.
+    fix_summary: >
+      Create minimal Role (not ClusterRole) scoped to the application namespace.
+      Grant only specific verbs on specific resources the application actually needs.
+    lesson: >
+      Kubernetes RBAC follows the same principle of least privilege as application
+      auth — wildcard permissions in RBAC are equivalent to admin credentials
+      in application code.
+
+  - id: "H14"
+    title: "Container running as root without security context"
+    severity: HIGH
+    pattern_ref: "isolation/excessive-perms"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/deployment.yaml:48"
+    description: >
+      Pod spec lacks securityContext entirely. Containers run as root by default
+      with writable filesystem and full Linux capabilities. A container escape
+      vulnerability grants host-level root access.
+    fix_summary: >
+      Add securityContext with runAsNonRoot: true, readOnlyRootFilesystem: true,
+      allowPrivilegeEscalation: false, and drop all capabilities. Use emptyDir
+      for writable paths.
+    lesson: >
+      Absent security context means maximum privilege — Kubernetes defaults are
+      permissive by design and must be explicitly restricted for every workload.
+
+  - id: "H15"
+    title: "Audit log silently drops entries on write failure"
+    severity: HIGH
+    pattern_ref: "resilience/audit-drop"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/audit/logger.go:56"
+    description: >
+      Audit logger ignores the error return from the database write call. When
+      the audit database is unavailable or the write fails, security events
+      (login attempts, permission changes, data access) are silently lost with
+      no alert or fallback mechanism.
+    fix_summary: >
+      Check error return from audit writes. Implement fallback to local file
+      buffer and stderr. Add monitoring alert on audit pipeline failures. Never
+      silently discard security events.
+    lesson: >
+      Silent audit log failures make incident investigation impossible — if you
+      cannot prove what happened, you must assume the worst case occurred.
+
+  - id: "H16"
+    title: "Docker images using :latest tag without version pinning"
+    severity: HIGH
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: "SA-26:01"
+    location: "deploy/docker-compose.yml:8"
+    description: >
+      All Docker images referenced with :latest tag instead of specific version
+      or SHA256 digest. A compromised registry or supply chain attack can inject
+      malicious images that are automatically pulled on next deployment.
+    fix_summary: >
+      Pin all images to specific SHA256 digests (image@sha256:abc...). Use
+      automated tools to update digests with verification. Sign images with
+      cosign and verify signatures on pull.
+    lesson: >
+      :latest is a mutable pointer, not a version — treat container image
+      references like dependency locks and pin to immutable identifiers.
+
+  - id: "H17"
+    title: "All services deployed in single K8s namespace"
+    severity: HIGH
+    pattern_ref: "isolation/shared-namespace"
+    freebsd_sa_ref: "SA-26:04"
+    location: "deploy/k8s/namespace.yaml:1"
+    description: >
+      Gateway, payment service, worker service, and database proxies all
+      deployed in the 'default' namespace. No blast radius containment —
+      a compromised service can access secrets and network endpoints of
+      all other services via the Kubernetes API.
+    fix_summary: >
+      Separate into dedicated namespaces by trust boundary: gateway-prod,
+      payment-prod, worker-prod, data-prod. Apply RBAC and NetworkPolicy
+      per namespace.
+    lesson: >
+      Kubernetes namespaces are the primary unit of isolation — the default
+      namespace should remain empty in production deployments.
+
+  - id: "H18"
+    title: "No NetworkPolicy — all pods can communicate freely"
+    severity: HIGH
+    pattern_ref: "isolation/missing-network-policy"
+    freebsd_sa_ref: "SA-26:04"
+    location: "deploy/k8s/"
+    description: >
+      No NetworkPolicy resources defined in any namespace. All pods can
+      communicate with all other pods on any port, including direct access
+      to database pods, Redis, and internal APIs. A compromised frontend
+      pod can directly query the payment database.
+    fix_summary: >
+      Create default-deny NetworkPolicy for each namespace. Add explicit
+      allow rules for required communication paths. Test with network
+      policy validation tools.
+    lesson: >
+      Without NetworkPolicy, Kubernetes networking is flat — every pod is one
+      hop from every other pod, turning any single compromise into full
+      lateral movement.
+
+  - id: "H19"
+    title: "GraphQL introspection enabled in production"
+    severity: HIGH
+    pattern_ref: "info-leakage/error-exposure"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/graphql/server.go:29"
+    description: >
+      GraphQL introspection query enabled in production, exposing the complete
+      API schema including internal types, deprecated fields, hidden mutations,
+      and admin-only operations. Attackers use introspection to map the entire
+      attack surface without authentication.
+    fix_summary: >
+      Disable introspection in production via schema configuration. Enable only
+      in development behind auth. Use schema registry for authorized consumers.
+    lesson: >
+      GraphQL introspection is a full API documentation endpoint — leaving it
+      enabled in production is equivalent to publishing your internal API docs
+      publicly.
+
+  - id: "H20"
+    title: "Missing response headers (X-Content-Type-Options, X-Frame-Options)"
+    severity: HIGH
+    pattern_ref: "info-leakage/error-exposure"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/middleware/headers.go:1"
+    description: >
+      API responses missing security headers: X-Content-Type-Options (MIME
+      sniffing), X-Frame-Options (clickjacking), Strict-Transport-Security
+      (HTTPS enforcement), and Content-Security-Policy. Browsers apply default
+      permissive behavior without these headers.
+    fix_summary: >
+      Add security headers middleware: X-Content-Type-Options: nosniff,
+      X-Frame-Options: DENY, Strict-Transport-Security with max-age,
+      Content-Security-Policy with restrictive directives.
+    lesson: >
+      Security headers are a defense-in-depth layer that costs nothing to
+      implement — missing headers leave browsers in their most permissive
+      default mode.
+
+  - id: "H21"
+    title: "Sensitive data in URL query parameters (logged by proxies)"
+    severity: HIGH
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/api/auth.ts:45"
+    description: >
+      Authentication tokens and user identifiers passed as URL query parameters
+      in API calls. Query strings are logged by reverse proxies, CDN edge nodes,
+      browser history, and appear in Referer headers sent to third-party
+      resources.
+    fix_summary: >
+      Move sensitive data to request headers (Authorization, X-User-ID) or
+      POST request bodies. Never pass tokens, credentials, or PII in URL
+      query parameters.
+    lesson: >
+      URLs are logged everywhere in the request chain — any data in query
+      parameters should be treated as written to multiple persistent logs
+      outside your control.
+
+  - id: "H22"
+    title: "Unrestricted file upload size"
+    severity: HIGH
+    pattern_ref: "input-boundary/unbounded-read"
+    freebsd_sa_ref: "SA-26:08"
+    location: "altus-gateway/internal/handler/upload_handler.go:38"
+    description: >
+      File upload endpoint reads entire request body with io.ReadAll without
+      http.MaxBytesReader wrapper. Attacker can upload multi-gigabyte files
+      to exhaust server memory, causing denial of service for all users.
+    fix_summary: >
+      Wrap request body with http.MaxBytesReader set to 10MB limit before
+      reading. Return 413 Payload Too Large when exceeded. Add global body
+      size limit middleware as defense in depth.
+    lesson: >
+      Every io.ReadAll on user input is a potential OOM vector — always wrap
+      with a size-limiting reader first, regardless of other validation.
+
+  - id: "H23"
+    title: "Phone numbers logged in plaintext"
+    severity: HIGH
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: "SA-25:04"
+    location: "altus-gateway/internal/auth/otp_service.go:67"
+    description: >
+      OTP service logs the full phone number in plaintext when sending
+      verification codes. Log aggregation system (ELK stack) stores these
+      indefinitely with broader access controls than the user database,
+      creating a PII exfiltration vector.
+    fix_summary: >
+      Implement phone number redaction in log output: log only last 4 digits
+      (***1234). Add structured logging with a PII sanitization middleware
+      that redacts sensitive fields before write.
+    lesson: >
+      Log sinks have different access controls than application databases —
+      PII in logs creates a shadow data store that bypasses your primary
+      access control model.
+
+  - id: "H24"
+    title: "No input validation on analytics event data"
+    severity: HIGH
+    pattern_ref: "input-boundary/missing-range-check"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/handler/analytics_handler.go:34"
+    description: >
+      Analytics event ingestion endpoint accepts arbitrary JSON payloads without
+      schema validation, field length limits, or type checking. Attackers can
+      inject oversized payloads, malicious strings, or unexpected data types
+      that corrupt analytics data or trigger downstream processing errors.
+    fix_summary: >
+      Define strict JSON schema for analytics events. Validate field types,
+      string lengths, numeric ranges, and enum values. Reject payloads that
+      do not conform to the schema with 400 Bad Request.
+    lesson: >
+      Analytics endpoints are often treated as low-security because they are
+      write-only — but unvalidated input to any endpoint is an attack vector
+      for injection, DoS, and data corruption.
+
+  - id: "H25"
+    title: "Default Kubernetes service account mounted in all pods"
+    severity: HIGH
+    pattern_ref: "isolation/excessive-perms"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/deployment.yaml:22"
+    description: >
+      Pod specs do not set automountServiceAccountToken: false. The default
+      service account token is mounted at /var/run/secrets/kubernetes.io in
+      every container, granting Kubernetes API access. A compromised container
+      can query the API server to discover services, read configmaps, and
+      potentially escalate privileges.
+    fix_summary: >
+      Set automountServiceAccountToken: false on all pod specs. Create dedicated
+      service accounts with minimal RBAC for pods that actually need API access.
+    lesson: >
+      Default service account tokens are credentials — mounting them in every
+      pod is equivalent to distributing a master key to every room in a building.
+
+  - id: "H26"
+    title: "Stack traces exposed in API error responses"
+    severity: HIGH
+    pattern_ref: "info-leakage/error-exposure"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/middleware/error_handler.go:23"
+    description: >
+      Global error handler returns err.Error() directly in JSON response body.
+      Stack traces, database connection strings, file paths, and internal
+      service names are exposed to API consumers. Error messages reveal Go
+      package structure and dependency versions.
+    fix_summary: >
+      Map internal errors to generic user-facing error codes. Log full error
+      detail server-side with correlation ID. Return only the correlation ID
+      and a safe error message to the client.
+    lesson: >
+      Error messages are information disclosure vectors — every detail in an
+      error response is intelligence for an attacker mapping your system.

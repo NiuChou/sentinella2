@@ -1,0 +1,374 @@
+# Defense-in-Depth Layer Definitions
+# 6-layer security model inspired by FreeBSD security architecture.
+# Each layer is independently verifiable with automated checks.
+
+schema_version: "1.0"
+kind: DefenseLayer
+
+layers:
+  - id: ingress
+    name: "Layer 1: Ingress TLS + WAF"
+    order: 1
+    freebsd_analog: "pf firewall"
+    description: >
+      Perimeter defense — TLS termination, WAF rules, rate limiting at edge.
+      First line of defense that filters malicious traffic before it reaches
+      application code. Analogous to FreeBSD pf firewall rules that block
+      malformed packets at the network boundary.
+    checks:
+      - id: "L1-01"
+        name: "TLS Configuration"
+        description: "TLS/HTTPS is configured for all public endpoints"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Scan ingress/proxy configuration files for TLS settings.
+          Verify certificates are valid and not self-signed in production.
+        detection:
+          files: ["**/ingress*.yaml", "**/nginx*.conf", "**/traefik*.yaml", "**/Caddyfile"]
+          pattern: "tls:|ssl_certificate|https|cert-manager|acme"
+          negative_pattern: "tls:\\s*false|ssl\\s*off|insecure-skip-tls-verify:\\s*true"
+
+      - id: "L1-02"
+        name: "WAF / Rate Limiting"
+        description: "WAF or rate limiting configured at ingress layer"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Check ingress configuration for rate limiting directives.
+          Verify WAF rules are active and not in detection-only mode.
+        detection:
+          files: ["**/ingress*.yaml", "**/nginx*.conf", "**/traefik*.yaml", "**/middleware*.yaml"]
+          pattern: "rate-limit|limit_req|throttle|waf|modsecurity|coraza"
+          negative_pattern: "SecRuleEngine\\s+DetectionOnly"
+
+      - id: "L1-03"
+        name: "HSTS Headers"
+        description: "HTTP Strict Transport Security headers configured"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Verify HSTS header is set with sufficient max-age (at least 31536000).
+          Check for includeSubDomains and preload directives.
+        detection:
+          files: ["**/nginx*.conf", "**/headers*", "**/*.yaml", "**/middleware*"]
+          pattern: "Strict-Transport-Security|hsts|max-age=\\d{8,}"
+          negative_pattern: "max-age=0"
+
+      - id: "L1-04"
+        name: "CORS Policy"
+        description: "Cross-Origin Resource Sharing policy restricts allowed origins"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Verify Access-Control-Allow-Origin is not set to wildcard (*) for
+          authenticated endpoints. Check that credentials mode is properly
+          configured.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/nginx*.conf", "**/*.yaml"]
+          pattern: "Access-Control-Allow-Origin|cors|allowOrigins"
+          negative_pattern: "Allow-Origin:\\s*\\*.*credentials|allowOrigins.*\\*.*allowCredentials"
+
+  - id: isolation
+    name: "Layer 2: Isolation"
+    order: 2
+    freebsd_analog: "jail + vnet"
+    description: >
+      Namespace separation, network policies, and service mesh controls.
+      Prevents lateral movement between services by enforcing strict
+      boundaries. Analogous to FreeBSD jails with vnet providing isolated
+      network stacks per service.
+    checks:
+      - id: "L2-01"
+        name: "Namespace Separation"
+        description: "Services deployed in separate namespaces with resource quotas"
+        pattern_refs: ["isolation/shared-boundary"]
+        tier: 1
+        verification: >
+          Verify Kubernetes manifests use distinct namespaces per domain.
+          Check that ResourceQuota and LimitRange are configured per namespace.
+        detection:
+          files: ["**/*.yaml", "**/kustomization.yaml"]
+          pattern: "namespace:|ResourceQuota|LimitRange"
+          negative_pattern: "namespace:\\s*default"
+
+      - id: "L2-02"
+        name: "Network Policy"
+        description: "NetworkPolicy restricts pod-to-pod communication to necessary paths"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify NetworkPolicy resources exist and default-deny ingress is set.
+          Check that each service has explicit ingress/egress rules.
+        detection:
+          files: ["**/networkpolicy*.yaml", "**/*.yaml"]
+          pattern: "kind:\\s*NetworkPolicy|policyTypes.*Ingress|policyTypes.*Egress"
+
+      - id: "L2-03"
+        name: "Service Mesh mTLS"
+        description: "Mutual TLS between services via service mesh or manual configuration"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify mTLS is enabled between services (Istio PeerAuthentication,
+          Linkerd auto-inject, or manual certificate configuration).
+        detection:
+          files: ["**/*.yaml", "**/istio*.yaml", "**/linkerd*.yaml"]
+          pattern: "PeerAuthentication|mtls|STRICT|linkerd.io/inject"
+          negative_pattern: "mode:\\s*PERMISSIVE|mtls:\\s*false"
+
+      - id: "L2-04"
+        name: "Container Image Provenance"
+        description: "Container images pulled from trusted registries with digest pinning"
+        pattern_refs: ["trust-chain/upstream-unverified"]
+        tier: 1
+        verification: >
+          Verify Dockerfiles and Kubernetes manifests use image digests
+          (image@sha256:...) instead of mutable tags (:latest).
+        detection:
+          files: ["**/Dockerfile*", "**/*.yaml"]
+          pattern: "image:.*@sha256:|FROM.*@sha256:"
+          negative_pattern: "image:.*:latest|FROM.*:latest"
+
+  - id: hardening
+    name: "Layer 3: Hardening"
+    order: 3
+    freebsd_analog: "capsicum"
+    description: >
+      Container and process hardening — read-only filesystems, dropped
+      capabilities, seccomp profiles, and non-root execution. Analogous
+      to FreeBSD Capsicum capability mode that restricts process access
+      to pre-authorized file descriptors and operations.
+    checks:
+      - id: "L3-01"
+        name: "Non-Root Execution"
+        description: "Containers and processes run as non-root user"
+        pattern_refs: ["isolation/excessive-perms"]
+        tier: 1
+        verification: >
+          Verify Dockerfiles include USER directive with non-root UID.
+          Check securityContext.runAsNonRoot in Kubernetes manifests.
+        detection:
+          files: ["**/Dockerfile*", "**/*.yaml"]
+          pattern: "USER\\s+(?!root)\\w+|runAsNonRoot:\\s*true|runAsUser:\\s*[1-9]\\d{2,}"
+          negative_pattern: "USER\\s+root|runAsUser:\\s*0"
+
+      - id: "L3-02"
+        name: "Read-Only Root Filesystem"
+        description: "Container root filesystem is mounted read-only"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Verify readOnlyRootFilesystem is set to true in securityContext.
+          Check that writable volumes are explicitly mounted for needed paths.
+        detection:
+          files: ["**/*.yaml"]
+          pattern: "readOnlyRootFilesystem:\\s*true"
+
+      - id: "L3-03"
+        name: "Dropped Capabilities"
+        description: "Linux capabilities dropped to minimum required set"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Verify securityContext drops ALL capabilities and only adds back
+          those explicitly needed. No container should have CAP_SYS_ADMIN.
+        detection:
+          files: ["**/*.yaml"]
+          pattern: "drop:\\s*\\[?[\"']?ALL|capabilities:.*drop"
+          negative_pattern: "add:.*SYS_ADMIN|privileged:\\s*true"
+
+      - id: "L3-04"
+        name: "Seccomp Profile"
+        description: "Seccomp profile applied to restrict available syscalls"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify seccomp profile is set to RuntimeDefault or a custom profile.
+          Check that Unconfined is not used in production workloads.
+        detection:
+          files: ["**/*.yaml"]
+          pattern: "seccomp\\.security|RuntimeDefault|Localhost"
+          negative_pattern: "Unconfined"
+
+  - id: access_control
+    name: "Layer 4: Access Control"
+    order: 4
+    freebsd_analog: "MAC framework"
+    description: >
+      Role-based access control, API key scoping, and route-level
+      authorization. Ensures every request is authenticated and authorized
+      for the specific resource and action. Analogous to FreeBSD MAC
+      (Mandatory Access Control) framework enforcing policy beyond DAC.
+    checks:
+      - id: "L4-01"
+        name: "Route-Level Authentication"
+        description: "All API routes require authentication except explicit public routes"
+        pattern_refs: ["auth-flow/missing-middleware"]
+        tier: 2
+        verification: >
+          Verify authentication middleware is applied globally or per-route.
+          Check that public routes are explicitly marked, not implicitly open.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/routes*", "**/middleware*"]
+          pattern: "authenticate|requireAuth|isAuthenticated|authMiddleware|jwt\\.verify"
+          negative_pattern: "app\\.(get|post|put|delete).*(?!auth)"
+
+      - id: "L4-02"
+        name: "RBAC Enforcement"
+        description: "Role-based access control enforced for sensitive operations"
+        pattern_refs: ["auth-flow/idor", "auth-flow/permission-equivalent"]
+        tier: 2
+        verification: >
+          Verify RBAC middleware checks role/permissions before handler execution.
+          Check that ownership verification exists for resource access.
+        detection:
+          files: ["**/*.go", "**/*.ts"]
+          pattern: "requireRole|hasPermission|authorize|checkOwnership|rbac"
+
+      - id: "L4-03"
+        name: "API Key Scoping"
+        description: "API keys scoped to minimum required permissions and resources"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify API keys have explicit scope limitations. Check that
+          key rotation is supported and expiration is enforced.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/*.yaml"]
+          pattern: "scope|permissions|apiKeyScope|keyExpiry|rotateKey"
+
+      - id: "L4-04"
+        name: "CSRF Protection"
+        description: "CSRF tokens validated for state-changing operations"
+        pattern_refs: ["auth-flow/csrf-missing"]
+        tier: 1
+        verification: >
+          Verify CSRF middleware is enabled for all state-changing endpoints.
+          Check that SameSite cookie attribute is set to Strict or Lax.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/middleware*"]
+          pattern: "csrf|csrfToken|SameSite|xsrf"
+          negative_pattern: "SameSite.*None|csrf.*disabled"
+
+  - id: data_protection
+    name: "Layer 5: Data Protection"
+    order: 5
+    freebsd_analog: "GELI encryption"
+    description: >
+      Encryption at rest and in transit, secure database connections,
+      and log masking for sensitive data. Ensures data confidentiality
+      throughout its lifecycle. Analogous to FreeBSD GELI disk encryption
+      protecting data at the storage layer.
+    checks:
+      - id: "L5-01"
+        name: "Encrypted Database Connections"
+        description: "Database connections use SSL/TLS encryption"
+        pattern_refs: []
+        tier: 1
+        verification: >
+          Verify database connection strings include sslmode=require or
+          equivalent TLS configuration. Check that certificate verification
+          is enabled, not disabled.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/*.yaml", "**/*.env*"]
+          pattern: "sslmode=require|sslmode=verify|ssl:\\s*true|useSSL=true"
+          negative_pattern: "sslmode=disable|ssl:\\s*false|rejectUnauthorized:\\s*false"
+
+      - id: "L5-02"
+        name: "Encryption at Rest"
+        description: "Sensitive data encrypted at rest in database and storage"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify sensitive columns use application-level encryption or
+          database-level transparent data encryption (TDE). Check that
+          encryption keys are managed via KMS.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/*.sql"]
+          pattern: "encrypt|pgcrypto|aes_encrypt|KMS|encryptedColumn"
+
+      - id: "L5-03"
+        name: "Log Masking"
+        description: "PII and secrets masked in application logs"
+        pattern_refs: ["info-leakage/sensitive-log"]
+        tier: 1
+        verification: >
+          Verify logging configuration includes masking/redaction rules for
+          PII fields (email, phone, SSN, card numbers). Check that
+          structured logging is used with field-level filtering.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/logger*", "**/logging*"]
+          pattern: "redact|mask|sanitize|scrub|filterSensitive"
+
+      - id: "L5-04"
+        name: "Backup Encryption"
+        description: "Database backups and exports encrypted with managed keys"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify backup scripts encrypt output with GPG or AES.
+          Check that backup encryption keys are stored separately from backups.
+        detection:
+          files: ["**/*.sh", "**/backup*", "**/Makefile", "**/*.yaml"]
+          pattern: "gpg\\s+--encrypt|openssl\\s+enc|backup.*encrypt|encrypted.*backup"
+
+  - id: tamper_detection
+    name: "Layer 6: Tamper Detection"
+    order: 6
+    freebsd_analog: "Immutable audit logs"
+    description: >
+      Audit trail integrity, Merkle anchoring, and configuration
+      fingerprinting. Detects unauthorized modifications to data, logs,
+      and system configuration. Analogous to FreeBSD immutable audit logs
+      that provide a tamper-evident record of system activity.
+    checks:
+      - id: "L6-01"
+        name: "Audit Trail"
+        description: "Security-relevant actions logged with immutable audit trail"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify audit logging exists for authentication events, permission
+          changes, data access, and admin operations. Check that audit logs
+          are append-only or write-once storage.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/audit*"]
+          pattern: "auditLog|audit_trail|createAuditEntry|logSecurityEvent"
+
+      - id: "L6-02"
+        name: "Audit Log Integrity"
+        description: "Audit log entries chained with cryptographic hashes"
+        pattern_refs: []
+        tier: 3
+        verification: >
+          Verify audit log entries include a hash of the previous entry
+          (hash chain) or are anchored to an external Merkle tree. Check
+          that hash verification can detect tampering.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/audit*"]
+          pattern: "previousHash|merkle|hashChain|hmac.*audit|integrityHash"
+
+      - id: "L6-03"
+        name: "Configuration Fingerprint"
+        description: "Runtime configuration fingerprinted and drift-detected"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify configuration is hashed at startup and periodically checked
+          for drift. Alert on unexpected configuration changes.
+        detection:
+          files: ["**/*.go", "**/*.ts", "**/config*"]
+          pattern: "configHash|configFingerprint|driftDetect|configChecksum"
+
+      - id: "L6-04"
+        name: "Integrity Monitoring"
+        description: "File integrity monitoring for critical system files"
+        pattern_refs: []
+        tier: 2
+        verification: >
+          Verify critical binaries and configuration files have known
+          checksums. Check that integrity violations trigger alerts.
+        detection:
+          files: ["**/*.yaml", "**/deploy*", "**/*.sh"]
+          pattern: "sha256sum|checksum|tripwire|aide|ossec|integrity"

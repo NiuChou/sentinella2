@@ -1,0 +1,105 @@
+# Input Boundary Validation Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: input-boundary
+name: "Input Boundary Validation Audit"
+description: "Audit for missing or insufficient input validation at system boundaries"
+
+pattern_refs:
+  - "input-boundary/unbounded-read"
+  - "input-boundary/blacklist-check"
+  - "input-boundary/missing-upload-validation"
+  - "input-boundary/missing-range-check"
+  - "input-boundary/missing-body-limit"
+
+prompt: |
+  Analyze the following code for input boundary validation vulnerabilities.
+  Input boundaries are where external data enters the system: HTTP requests,
+  file uploads, message queues, and external API responses.
+
+  ## Patterns to Check
+
+  ### 1. Unbounded Read [HIGH]
+
+  Look for code that reads request bodies, file uploads, or I/O streams into
+  memory without enforcing a maximum size. This enables memory exhaustion DoS.
+
+  Red flags:
+  - `io.ReadAll(r.Body)` or `ioutil.ReadAll()` without `io.LimitReader`
+  - `request.body` consumed without body parser size limit
+  - File reads without size check: `os.ReadFile(userPath)` where path is user-controlled
+  - Streaming reads without backpressure or size cap
+  - gRPC messages without `MaxRecvMsgSize` configured
+
+  FreeBSD CVE-2026-4747 analog: A 128-byte buffer accepted 400 bytes because
+  no bounds check existed on the read length, causing a heap overflow.
+
+  Real-world example: An upload handler used `io.ReadAll(r.Body)` to read the
+  entire request into memory. A 10GB POST request crashed the service. Fix:
+  wrap with `http.MaxBytesReader(w, r.Body, 10<<20)`.
+
+  ### 2. Blacklist Instead of Whitelist Validation [HIGH]
+
+  Look for deny-list logic instead of allow-list for access control or input
+  validation. Any value not explicitly denied passes through, including values
+  that did not exist when the check was written.
+
+  Red flags:
+  - `status != "blocked"` instead of `status == "active"`
+  - `role != "guest"` instead of `role == "admin"`
+  - File extension blacklists (`.exe`, `.bat`) instead of allowed types
+  - IP deny lists instead of allow lists for internal services
+  - Input sanitization that strips known-bad chars instead of allowing known-good
+
+  Real-world example: User status check used `if status != "blocked"`. When a new
+  status "pending_review" was added, those users bypassed the intended restriction.
+
+  ### 3. Missing File Upload Validation [HIGH]
+
+  Look for file upload handlers that accept files without validating MIME type,
+  file extension, or file size.
+
+  Red flags:
+  - `multer()` without `fileFilter` or `limits` configuration
+  - `r.FormFile("upload")` without Content-Type or size validation
+  - Trusting client-provided Content-Type header without magic byte verification
+  - Storing uploaded files with original filename (path traversal risk)
+  - Missing antivirus/malware scanning for uploaded files
+
+  Real-world example: Image upload accepted any Content-Type. Attacker uploaded
+  an HTML file with embedded JavaScript, served from the same origin, enabling XSS.
+
+  ### 4. Missing Numeric Range Check [MEDIUM]
+
+  Look for numeric values parsed from user input and used without bounds validation.
+
+  Red flags:
+  - `parseInt(req.query.page_size)` without min/max clamping
+  - `strconv.Atoi(query.Get("limit"))` used directly in SQL LIMIT clause
+  - Negative numbers accepted where only positive expected
+  - Integer overflow possible on 32-bit systems from large input values
+  - Float precision issues in financial calculations from user input
+
+  Real-world example: Analytics endpoint accepted `?page_size=999999`. The
+  resulting SQL `LIMIT 999999` dumped the entire table in one query.
+
+  ### 5. Missing HTTP Body Size Limit [HIGH]
+
+  Look for HTTP server setup that lacks global body size limiting middleware.
+
+  Red flags:
+  - `express()` without `express.json({ limit: '...' })`
+  - `gin.Default()` without `MaxBytesReader` middleware
+  - `http.ListenAndServe()` without body size middleware
+  - gRPC server without `MaxRecvMsgSize` option
+  - WebSocket server without message size limit
+
+  Real-world example: Express server had no body limit configured. Default is
+  unlimited in some configurations. A single POST with a 2GB JSON body caused OOM.
+
+  ## Code to Analyze
+
+  {code_context}

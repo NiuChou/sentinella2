@@ -1,0 +1,109 @@
+# Isolation Boundary Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: isolation
+name: "Isolation Boundary Audit"
+description: "Audit for missing or broken isolation controls in container and cluster environments"
+
+pattern_refs:
+  - "isolation/shared-namespace"
+  - "isolation/writable-rootfs"
+  - "isolation/excessive-perms"
+  - "isolation/missing-network-policy"
+
+prompt: |
+  Analyze the following code and configuration for isolation boundary vulnerabilities.
+  Isolation boundaries prevent lateral movement -- when one service is compromised,
+  proper isolation prevents the attacker from reaching other services or data.
+
+  ## Patterns to Check
+
+  ### 1. Shared Kubernetes Namespace [HIGH]
+
+  Look for all services deployed in the same namespace, preventing blast radius
+  containment.
+
+  Red flags:
+  - All deployments use `namespace: "default"`
+  - No namespace definitions in Kubernetes manifests
+  - Shared namespace between public-facing and internal services
+  - Database pods in the same namespace as application pods
+  - Missing ResourceQuota and LimitRange per namespace
+
+  FreeBSD SA-26:04 analog: Jail escape was possible because isolation boundaries
+  were not enforced between workloads. In Kubernetes, a shared namespace means
+  shared RBAC, shared network policy scope, and shared resource quotas.
+
+  Real-world example: All 12 microservices deployed to `default` namespace.
+  When the public API was compromised via SSRF, the attacker could directly
+  reach the payment database pod because no namespace isolation existed.
+
+  ### 2. Writable Root Filesystem in Container [HIGH]
+
+  Look for containers running without `readOnlyRootFilesystem`, allowing attacker
+  persistence via file writes.
+
+  Red flags:
+  - `securityContext` present but `readOnlyRootFilesystem` missing or false
+  - No `securityContext` defined at all on containers
+  - Dockerfile without `USER` directive (defaults to root with writable fs)
+  - Writable paths that include `/usr/bin`, `/etc`, or application directories
+  - Missing emptyDir volumes for paths that legitimately need writes (`/tmp`)
+
+  FreeBSD SA-26:02 analog: Writable filesystem allowed persistent jail compromise.
+  An attacker who achieves code execution in a container with writable rootfs can
+  install backdoors, modify binaries, or alter configuration files.
+
+  ### 3. Excessive Default Permissions [HIGH]
+
+  Look for containers running as root, using default service accounts, or without
+  explicit RBAC role bindings.
+
+  Red flags:
+  - `runAsUser: 0` or missing `runAsNonRoot: true`
+  - `serviceAccountName: "default"` or no service account specified
+  - `automountServiceAccountToken: true` (exposes K8s API token to container)
+  - `privileged: true` in securityContext
+  - `allowPrivilegeEscalation: true` or not explicitly set to false
+  - Missing capability drops (`drop: ["ALL"]`)
+  - `CAP_SYS_ADMIN` in capability add list
+
+  Real-world example: Payment service used the default service account with
+  auto-mounted token. After container compromise, the attacker used the token
+  to list secrets across the cluster via the Kubernetes API.
+
+  ### 4. Missing Network Policy [HIGH]
+
+  Look for Kubernetes clusters or namespaces that lack NetworkPolicy resources,
+  allowing unrestricted pod-to-pod communication.
+
+  Red flags:
+  - Deployments exist but no NetworkPolicy resources in the same namespace
+  - NetworkPolicy with empty `podSelector` and wide-open ingress rules
+  - Egress not restricted (pods can reach any external endpoint)
+  - No default-deny policy applied to namespace
+  - Database pods accessible from all namespaces
+
+  FreeBSD SA-26:04 analog: Lack of network isolation between jails enabled
+  lateral movement. In Kubernetes, without NetworkPolicy, any pod can talk to
+  any other pod on any port across all namespaces.
+
+  Real-world example: No NetworkPolicy defined. After compromising the
+  notification service, the attacker pivoted directly to the database pod
+  on port 5432 because no network segmentation existed.
+
+  ## Additional Checks
+
+  When analyzing infrastructure code, also look for:
+  - Docker socket mounted into containers (`/var/run/docker.sock`)
+  - Host network mode (`hostNetwork: true`)
+  - Host PID namespace (`hostPID: true`)
+  - Missing pod security standards (PSS) enforcement
+  - Overly permissive ClusterRole bindings
+
+  ## Code to Analyze
+
+  {code_context}

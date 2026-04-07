@@ -1,0 +1,237 @@
+# Pattern Category: Information Leakage
+# Covers sensitive logging, error exposure, config leaks, and console leaks.
+# Source: perseworks 93-vulnerability audit.
+
+schema_version: "1.0"
+kind: Pattern
+category: info-leakage
+
+patterns:
+  - id: "info-leakage/sensitive-log"
+    name: "Sensitive Data in Logs"
+    description: "Sensitive data (PII, tokens, passwords) written to application logs"
+    severity: HIGH
+    owasp: ["A09"]
+    freebsd_sa: ["SA-25:04"]
+    cases: ["H23", "H26"]
+
+    detection:
+      abstract: >
+        Detects logging statements that include sensitive data fields such as
+        phone numbers, email addresses, authentication tokens, passwords, or
+        credit card numbers. Log aggregation systems often have weaker access
+        controls than production databases, turning log sinks into data
+        exfiltration targets.
+      tier: 1
+      rules:
+        go:
+          pattern: 'log\.\w+\(.*(?:phone|mobile|token|password|secret|card|ssn|email|credential)'
+          negative_pattern: 'log\.\w+\(.*mask\(|redact\(|sanitize\('
+          context: "**/*.go"
+        typescript:
+          pattern: 'console\.\w+\(.*(?:phone|token|password|secret|card|ssn|email|credential)|logger\.\w+\(.*(?:phone|token|password|secret|card|ssn|email|credential)'
+          negative_pattern: 'mask\(|redact\(|sanitize\(|\*\*\*'
+          context: "**/*.{ts,js}"
+        python:
+          pattern: 'logging?\.\w+\(.*(?:phone|token|password|secret|card|ssn|email|credential)'
+          negative_pattern: 'mask\(|redact\(|sanitize\('
+          context: "**/*.py"
+      false_positive_hints:
+        - "Logging field names without values is safe (e.g. 'missing phone field')"
+        - "Redacted or masked values (***) in log output are mitigated"
+        - "Structured logging with explicit field filtering is mitigated"
+
+    fix:
+      abstract: >
+        Implement a log sanitization layer that redacts sensitive fields before
+        writing to any log sink. Use structured logging with an allowlist of
+        safe fields. Mask PII fields with partial redaction (e.g., ***@example.com).
+        Never log raw authentication tokens, passwords, or full credit card numbers.
+      templates:
+        go: |
+          // SAFE: structured logging with redaction
+          logger.Info("user login",
+              zap.String("user_id", user.ID),
+              zap.String("email", redact.Email(user.Email)),
+              // Never log: password, token, full phone
+          )
+
+          func redactEmail(email string) string {
+              parts := strings.SplitN(email, "@", 2)
+              if len(parts) != 2 { return "***" }
+              return "***@" + parts[1]
+          }
+        typescript: |
+          // SAFE: redaction middleware for logger
+          function redactSensitive(obj: Record<string, unknown>): Record<string, unknown> {
+            const sensitiveKeys = /phone|token|password|secret|card|ssn|email|credential/i;
+            return Object.fromEntries(
+              Object.entries(obj).map(([k, v]) =>
+                sensitiveKeys.test(k) ? [k, '***REDACTED***'] : [k, v]
+              )
+            );
+          }
+
+  - id: "info-leakage/error-exposure"
+    name: "Error Detail Exposure"
+    description: "Detailed internal error messages exposed to end users via API responses"
+    severity: MEDIUM
+    owasp: ["A09"]
+    cases: ["H26"]
+
+    detection:
+      abstract: >
+        Detects API handlers that return raw internal error messages to users.
+        Error details can reveal database schema, file paths, library versions,
+        and internal service names, aiding attackers in crafting targeted
+        exploits.
+      tier: 1
+      rules:
+        go:
+          pattern: 'c\.(JSON|String)\(.*err\.Error\(\)|json\.NewEncoder.*err\.Error\(\)'
+          negative_pattern: 'NewAPIError\(|toPublicError\(|publicMessage'
+          context: "**/*.go"
+        typescript:
+          pattern: 'res\.(json|send)\(\{.*error:\s*err\.(message|stack)|res\.status\(\d+\)\.json\(\{.*err\.'
+          negative_pattern: 'toPublicError\(|sanitizeError\(|PUBLIC_ERROR'
+          context: "**/*.ts"
+        python:
+          pattern: 'jsonify\(\{.*["\x27]error["\x27]:\s*str\(e\)|return.*HttpResponse.*str\(e\)'
+          negative_pattern: 'to_public_error\(|sanitize_error\('
+          context: "**/*.py"
+      false_positive_hints:
+        - "Development-only error handlers with NODE_ENV check are lower risk"
+        - "Errors mapped to generic codes before response are mitigated"
+        - "GraphQL error extensions with filtered fields are mitigated"
+
+    fix:
+      abstract: >
+        Map internal errors to generic user-facing error codes and messages.
+        Log the full error detail server-side with a correlation ID. Return
+        only the correlation ID and a safe error message to the client.
+        Never expose stack traces, SQL errors, or file paths.
+      templates:
+        go: |
+          // SAFE: map to public error, log detail server-side
+          func handleError(c echo.Context, err error) error {
+              correlationID := uuid.NewString()
+              logger.Error("request failed",
+                  zap.String("correlation_id", correlationID),
+                  zap.Error(err),
+              )
+              return c.JSON(http.StatusInternalServerError, map[string]string{
+                  "error":          "An internal error occurred",
+                  "correlation_id": correlationID,
+              })
+          }
+        typescript: |
+          // SAFE: generic error with correlation ID
+          app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+            const correlationId = crypto.randomUUID();
+            logger.error({ correlationId, error: err.message, stack: err.stack });
+            res.status(500).json({
+              error: 'An internal error occurred',
+              correlationId,
+            });
+          });
+
+  - id: "info-leakage/config-leak"
+    name: "Configuration Secret Leak"
+    description: "Configuration files containing secrets are accessible or committed to source control"
+    severity: CRITICAL
+    owasp: ["A05"]
+    cases: ["M-settings", "C3", "C6"]
+
+    detection:
+      abstract: >
+        Detects configuration files that contain production secrets (API keys,
+        database passwords, signing keys) and are either committed to source
+        control, served by web servers, or lack proper access controls.
+        Also detects missing .gitignore entries for secret-bearing files.
+      tier: 1
+      rules:
+        config:
+          pattern: '(password|secret|api_key|private_key|DATABASE_URL|AWS_SECRET)\s*[=:]\s*["\x27]?[A-Za-z0-9+/=_-]{8,}'
+          negative_pattern: '(password|secret|api_key)\s*[=:]\s*["\x27]?\$\{|vault://|ssm://|<PLACEHOLDER>'
+          context: "**/*.{env,yaml,yml,json,toml,ini,conf,cfg}"
+        gitignore:
+          pattern: '\.env$'
+          negative_pattern: '\.env'
+          context: "**/.gitignore"
+      false_positive_hints:
+        - "Example/template files with placeholder values are safe"
+        - "Files referencing vault or SSM parameter store are mitigated"
+        - ".env.example with dummy values is documentation, not a leak"
+
+    fix:
+      abstract: >
+        Never commit secrets to source control. Use environment variables,
+        a secrets manager (Vault, AWS SSM, GCP Secret Manager), or encrypted
+        secrets files. Add .env and secret-bearing files to .gitignore.
+        Rotate any secrets that were previously committed.
+      templates:
+        gitignore: |
+          # REQUIRED: add to .gitignore
+          .env
+          .env.local
+          .env.production
+          *.key
+          *.pem
+          credentials.json
+          secrets.yaml
+        go: |
+          // SAFE: load secrets from environment
+          dbPassword := os.Getenv("DATABASE_PASSWORD")
+          if dbPassword == "" {
+              log.Fatal("DATABASE_PASSWORD environment variable is required")
+          }
+
+  - id: "info-leakage/console-leak"
+    name: "Debug Console Logging in Production"
+    description: "Debug logging statements left in production source code"
+    severity: LOW
+    owasp: ["A09"]
+    cases: ["L-console"]
+
+    detection:
+      abstract: >
+        Detects console.log, console.error, console.debug, and similar debug
+        logging statements in production source code. These can leak internal
+        state to browser developer tools, expose implementation details,
+        and create noise that masks real issues in production monitoring.
+      tier: 1
+      rules:
+        typescript:
+          pattern: 'console\.(log|debug|info|warn|error|trace)\('
+          negative_pattern: '// eslint-disable.*no-console|process\.env\.NODE_ENV.*development|if\s*\(.*debug'
+          context: "src/**/*.{ts,tsx,js,jsx}"
+        python:
+          pattern: 'print\((?!.*file=sys\.stderr)'
+          negative_pattern: 'if\s+debug|if\s+verbose|logging\.'
+          context: "src/**/*.py"
+      false_positive_hints:
+        - "Console statements inside debug/development conditionals are acceptable"
+        - "Logger wrappers that respect log levels are not console leaks"
+        - "CLI tools that intentionally print output are not leaks"
+        - "Test files are excluded from this check"
+
+    fix:
+      abstract: >
+        Replace console.log with a structured logger that respects log levels
+        and can be silenced in production. Use ESLint no-console rule to
+        prevent new console statements. For temporary debugging, use
+        conditional debug logging that is stripped in production builds.
+      templates:
+        typescript: |
+          // SAFE: use structured logger instead of console
+          import { logger } from './logger';
+          logger.debug('processing order', { orderId });
+          // logger is configured to suppress debug level in production
+
+          // ESLint config to prevent console usage
+          // "no-console": ["error", { "allow": ["warn", "error"] }]
+        python: |
+          # SAFE: use logging module instead of print
+          import logging
+          logger = logging.getLogger(__name__)
+          logger.debug("processing order %s", order_id)

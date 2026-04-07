@@ -1,0 +1,9 @@
+{
+  "_comment": "Add to VS Code MCP settings (Continue extension)",
+  "mcpServers": {
+    "sentinella2": {
+      "command": "sentinella2-mcp",
+      "args": []
+    }
+  }
+}

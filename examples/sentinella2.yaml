@@ -1,0 +1,26 @@
+# .sentinella2.yaml - project-level sentinella2 configuration
+# Place in your project root
+
+# Scan settings
+scan:
+  exclude:
+    - "vendor/**"
+    - "node_modules/**"
+    - "**/*_test.go"
+    - "**/*.test.ts"
+
+  # Disable specific rules
+  disable_rules:
+    - "info-leakage/console-leak"  # We use structured logging
+
+# Defense layer overrides
+defense_layers:
+  # Disable layers not applicable to this project
+  disable:
+    - "tamper_detection"  # Not applicable for this project type
+
+# LLM audit settings (for 'sentinella2 audit')
+audit:
+  provider: "openai-compatible"
+  base_url: "http://localhost:11434/v1"  # Local Ollama
+  model: "llama3"

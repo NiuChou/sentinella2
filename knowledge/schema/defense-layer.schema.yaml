@@ -1,0 +1,78 @@
+# Defense Layer Schema Definition
+# Defines the 6-layer defense-in-depth model.
+# Each layer contains checks that verify security controls are in place.
+
+schema_version: "1.0"
+kind: DefenseLayerSchema
+
+fields:
+  id:
+    type: string
+    required: true
+    description: "Unique layer identifier"
+    example: "L1-perimeter"
+
+  name:
+    type: string
+    required: true
+    description: "Human-readable layer name"
+    example: "Perimeter Defense"
+
+  order:
+    type: integer
+    required: true
+    description: "Layer position in defense-in-depth stack (1 = outermost)"
+    values: [1, 2, 3, 4, 5, 6]
+
+  description:
+    type: string
+    required: true
+    description: "What this defense layer protects against"
+
+  checks:
+    type: object[]
+    required: true
+    description: "Security checks belonging to this layer"
+    item_schema:
+      id:
+        type: string
+        required: true
+        description: "Unique check identifier within the layer"
+        example: "L1-01"
+
+      name:
+        type: string
+        required: true
+        description: "Human-readable check name"
+
+      description:
+        type: string
+        required: true
+        description: "What the check verifies"
+
+      pattern_refs:
+        type: string[]
+        required: false
+        description: "Pattern IDs that this check detects"
+        example: ["input-boundary/missing-body-limit"]
+
+      tier:
+        type: enum
+        required: true
+        values: [1, 2, 3]
+        description: "Detection difficulty tier for this check"
+
+      verification:
+        type: string
+        required: true
+        description: "How to verify this check passes"
+
+layers:
+  description: >
+    The 6 defense layers, from outermost to innermost:
+    L1 - Perimeter: Network boundaries, ingress controls, WAF, rate limiting
+    L2 - Authentication: Identity verification, session management, credential storage
+    L3 - Authorization: Access control, RBAC, ownership verification, IDOR prevention
+    L4 - Input Validation: Boundary checks, type validation, size limits, sanitization
+    L5 - Isolation: Container hardening, namespace separation, network policies, RBAC
+    L6 - Resilience: Fail-closed behavior, audit logging, circuit breakers, resource limits

@@ -1,0 +1,393 @@
+# Authentication and Authorization Flow Patterns
+# Category: auth-flow
+# Detects broken authentication, authorization bypass, and access control flaws.
+# Source: perseworks 93-vulnerability audit + FreeBSD SA-25:05 analysis.
+
+schema_version: "1.0"
+kind: PatternFile
+category: auth-flow
+
+patterns:
+  - id: "auth-flow/idor"
+    name: "Insecure Direct Object Reference"
+    description: "Data access by ID without verifying the requesting user owns or is authorized to access the resource"
+    severity: HIGH
+    owasp: ["A01"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify database lookups or API calls that retrieve a resource by
+        its primary key (ID) without also filtering by the authenticated
+        user's ID or verifying ownership after retrieval. This allows any
+        authenticated user to access any other user's data by guessing or
+        enumerating IDs.
+      tier: 2
+      rules:
+        go:
+          pattern: 'repo\.Find.*ByID\(|\.Where\("id\s*=\s*\?"|\.First\(&.*,\s*id\)'
+          negative_pattern: '\.Where\(".*user_id\s*=|\.Where\(".*owner_id\s*=|OwnershipCheck|authorizeResource'
+          context: "**/*.go — Repository methods, service layer, HTTP handlers that fetch by ID"
+        typescript:
+          pattern: 'findOne\(\{[^}]*_id|findById\(|\.get\(\s*id\s*\)'
+          negative_pattern: 'userId.*_id|ownerId|createdBy|authorizeResource|checkOwnership'
+          context: "**/*.ts — Mongoose/TypeORM/Prisma queries in route handlers"
+        python:
+          pattern: '\.objects\.get\(pk=|\.objects\.get\(id=|\.filter\(id='
+          negative_pattern: 'user=request\.user|owner=|created_by=request\.user|check_object_permissions'
+          context: "**/*.py — Django ORM queries, DRF viewset methods"
+      false_positive_hints:
+        - "Public resources that are intentionally accessible to all users"
+        - "Admin endpoints with separate admin-only auth middleware"
+        - "Lookup methods called after an ownership check in the same handler"
+    fix:
+      abstract: >
+        Always include the authenticated user's ID in the database query or
+        verify ownership immediately after retrieval. Prefer query-level
+        filtering (WHERE user_id = ?) over post-query checks to avoid
+        timing-based information leaks.
+      templates:
+        go: |
+          // Before: IDOR — any user can access any payment
+          // payment, err := repo.FindPaymentByID(ctx, paymentID)
+
+          // After: ownership enforced at query level
+          payment, err := repo.FindPaymentByIDAndUserID(ctx, paymentID, currentUserID)
+          if err != nil {
+              return ErrNotFound  // Do not distinguish "not found" from "not yours"
+          }
+        typescript: |
+          // Before: IDOR
+          // const order = await Order.findById(req.params.id);
+
+          // After: ownership enforced
+          const order = await Order.findOne({
+            _id: req.params.id,
+            userId: req.user.id,
+          });
+          if (!order) {
+            throw new NotFoundError('Order not found');
+          }
+    cases: ["H6"]
+
+  - id: "auth-flow/dev-bypass"
+    name: "Development Bypass in Production"
+    description: "Debug or development code paths that skip security checks are reachable in production"
+    severity: CRITICAL
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify conditional branches that check environment variables
+        (APP_ENV, NODE_ENV, DEBUG) and bypass authentication, authorization,
+        or validation when not in production. If the environment variable is
+        unset or misconfigured, the bypass activates in production.
+      tier: 3
+      rules:
+        go:
+          pattern: 'os\.Getenv\("APP_ENV"\).*!=.*"production"|os\.Getenv\("DEBUG"\)|os\.Getenv\("ENV"\).*!=.*"prod"'
+          negative_pattern: 'os\.Getenv\("APP_ENV"\)\s*==\s*"production"|// build tag|//go:build !release'
+          context: "**/*.go — Auth middleware, OTP verification, payment validation"
+        typescript:
+          pattern: 'process\.env\.NODE_ENV\s*!==?\s*[''"]production[''"]|process\.env\.DEBUG'
+          negative_pattern: 'process\.env\.NODE_ENV\s*===?\s*[''"]production[''"].*strict|// test-only'
+          context: "**/*.ts — Auth middleware, security checks, validation bypasses"
+        python:
+          pattern: 'os\.environ\.get\([''"]DEBUG|os\.environ.*!=.*production|settings\.DEBUG'
+          negative_pattern: 'settings\.DEBUG.*is.*False|assert not settings\.DEBUG'
+          context: "**/*.py — Django settings, Flask config, auth decorators"
+      false_positive_hints:
+        - "Feature flags backed by a proper feature flag service"
+        - "Log-level changes based on environment (non-security)"
+        - "Build-time constants that cannot be changed at runtime"
+    fix:
+      abstract: >
+        Remove all environment-based security bypasses. If development
+        convenience is needed, use compile-time build tags or test-only
+        modules that are physically excluded from production builds.
+        Never use runtime environment checks to skip security controls.
+      templates:
+        go: |
+          // Before: OTP bypass in dev
+          // if os.Getenv("APP_ENV") != "production" {
+          //     return true // skip OTP
+          // }
+
+          // After: no bypass — use build tags for test helpers
+          //go:build !testing
+          func verifyOTP(code string, expected string) bool {
+              return subtle.ConstantTimeCompare([]byte(code), []byte(expected)) == 1
+          }
+        typescript: |
+          // Before: auth bypass in dev
+          // if (process.env.NODE_ENV !== 'production') return next();
+
+          // After: always enforce auth — use test mocks instead
+          export function authMiddleware(req: Request, res: Response, next: NextFunction) {
+            const token = req.headers.authorization;
+            if (!token) {
+              return res.status(401).json({ error: 'Missing token' });
+            }
+            // Always verify, no environment bypass
+            const payload = verifyToken(token);
+            req.user = payload;
+            next();
+          }
+    cases: ["C2"]
+
+  - id: "auth-flow/signature-skip"
+    name: "Cryptographic Signature Verification Skipped"
+    description: "Signature or HMAC verification function exists but is not called or is marked TODO"
+    severity: CRITICAL
+    owasp: ["A02"]
+    freebsd_sa: ["SA-25:05"]
+    detection:
+      abstract: >
+        Identify code where cryptographic verification (signature, HMAC,
+        JWT verification) is defined but never invoked, or where a TODO/FIXME
+        comment indicates verification was deferred. The FreeBSD SA-25:05
+        analog: OpenSSH signature verification existed but was not called
+        on a critical path.
+      tier: 3
+      rules:
+        go:
+          pattern: 'TODO.*[Ss]ign|FIXME.*[Vv]erif|//.*skip.*verif|func\s+[Vv]erify\w*Signature'
+          negative_pattern: '[Vv]erify\w*Signature\(|hmac\.Equal\(|subtle\.ConstantTimeCompare\('
+          context: "**/*.go — Payment callbacks, webhook handlers, JWT middleware"
+        typescript:
+          pattern: 'TODO.*sign|FIXME.*verif|//.*skip.*verif|function\s+verify\w*Signature'
+          negative_pattern: 'crypto\.verify\(|crypto\.createHmac.*\.verify|jwt\.verify\('
+          context: "**/*.ts — Payment webhook handlers, JWT middleware, crypto utils"
+        python:
+          pattern: 'TODO.*sign|FIXME.*verif|#.*skip.*verif|def\s+verify_\w*signature'
+          negative_pattern: 'hmac\.compare_digest\(|verify_signature\(|jwt\.decode\(.*verify=True'
+          context: "**/*.py — Payment callbacks, webhook handlers, JWT auth"
+      false_positive_hints:
+        - "TODO comments in test files for planned test cases"
+        - "Verify functions that are called from a different module (check call graph)"
+        - "Deprecated verify functions with replacement already in use"
+    fix:
+      abstract: >
+        Call the verification function on every code path that processes
+        externally-signed data. Never accept unverified signatures. If
+        verification is not yet implemented, reject all requests on that
+        path until it is.
+      templates:
+        go: |
+          // Before: signature verification TODO
+          // func handleWeChatCallback(c *gin.Context) {
+          //     // TODO: verify signature
+          //     processPayment(c)
+          // }
+
+          // After: verify before processing, reject on failure
+          func handleWeChatCallback(c *gin.Context) {
+              if err := verifyWeChatSignature(c.Request); err != nil {
+                  c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid signature"})
+                  return
+              }
+              processPayment(c)
+          }
+        typescript: |
+          // Before: TODO verify
+          // async function handleWebhook(req, res) {
+          //   // TODO: verify signature
+          //   processEvent(req.body);
+          // }
+
+          // After: always verify
+          async function handleWebhook(req: Request, res: Response) {
+            const signature = req.headers['x-signature'] as string;
+            if (!verifyWebhookSignature(req.body, signature, SECRET)) {
+              return res.status(403).json({ error: 'Invalid signature' });
+            }
+            processEvent(req.body);
+          }
+    cases: ["C1"]
+
+  - id: "auth-flow/csrf-missing"
+    name: "Missing CSRF Protection"
+    description: "State-changing HTTP endpoints (POST/PUT/DELETE) lack CSRF token validation"
+    severity: HIGH
+    owasp: ["A01"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify POST, PUT, PATCH, and DELETE route handlers that do not
+        validate a CSRF token. Without CSRF protection, an attacker can
+        forge requests from a victim's browser session to perform
+        unauthorized state changes.
+      tier: 2
+      rules:
+        go:
+          pattern: '\.POST\(|\.PUT\(|\.DELETE\(|\.PATCH\(|"POST"|"PUT"|"DELETE"'
+          negative_pattern: 'csrf\.|CSRFToken|nosurf|gorilla/csrf|SameSite.*Strict|csrfProtection'
+          context: "**/*.go — Router definitions, handler registration"
+        typescript:
+          pattern: 'app\.post\(|router\.post\(|app\.put\(|app\.delete\(|app\.patch\('
+          negative_pattern: 'csurf|csrf|csrfToken|csrfProtection|SameSite.*Strict|x-csrf-token'
+          context: "**/*.ts — Express/Koa router files, app setup"
+        python:
+          pattern: '@app\.route\(.*methods=.*POST|@csrf_exempt|@api_view\(\[.POST'
+          negative_pattern: 'csrf_protect|CsrfViewMiddleware|csrf_token|@ensure_csrf_cookie'
+          context: "**/*.py — Flask routes, Django views, DRF viewsets"
+      false_positive_hints:
+        - "API endpoints that use Bearer token auth (not cookie-based)"
+        - "Webhook endpoints that verify signatures instead of CSRF"
+        - "Internal service-to-service endpoints not accessible from browsers"
+    fix:
+      abstract: >
+        Enable CSRF protection middleware for all state-changing endpoints
+        that use cookie-based authentication. For API endpoints using
+        Bearer tokens, CSRF is not needed since the token is not
+        automatically attached by the browser.
+      templates:
+        go: |
+          import "github.com/gorilla/csrf"
+
+          csrfMiddleware := csrf.Protect(
+              []byte(os.Getenv("CSRF_KEY")),
+              csrf.Secure(true),
+              csrf.SameSite(csrf.SameSiteStrictMode),
+          )
+          r.Use(csrfMiddleware)
+        typescript: |
+          import csrf from 'csurf';
+
+          const csrfProtection = csrf({ cookie: { httpOnly: true, sameSite: 'strict' } });
+          app.use(csrfProtection);
+    cases: []
+
+  - id: "auth-flow/permission-equivalent"
+    name: "Permission Level Equivalence"
+    description: "Different permission levels can access the same sensitive operations due to coarse-grained checks"
+    severity: HIGH
+    owasp: ["A01"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify authorization checks that treat different roles as equivalent
+        for sensitive operations. For example, checking "is authenticated"
+        instead of "is admin" for admin-only endpoints, or checking
+        "role != guest" instead of "role == admin" for privilege escalation-
+        sensitive operations.
+      tier: 3
+      rules:
+        go:
+          pattern: 'role\s*!=\s*""|isAuthenticated|role\s*!=\s*"guest"|len\(roles\)\s*>\s*0'
+          negative_pattern: 'role\s*==\s*"admin"|HasPermission\(|RequireRole\(.*"admin"|rbac\.Check'
+          context: "**/*.go — Admin endpoints, role-gated handlers, middleware"
+        typescript:
+          pattern: 'req\.user|isAuthenticated|role\s*!==?\s*[''"]guest[''"]|roles\.length\s*>'
+          negative_pattern: 'role\s*===?\s*[''"]admin[''"]|hasPermission\(|requireRole\(.*admin|rbac'
+          context: "**/*.ts — Admin routes, role middleware, permission checks"
+        python:
+          pattern: 'request\.user\.is_authenticated|login_required|role\s*!=.*guest'
+          negative_pattern: 'is_superuser|has_perm\(|@permission_required|IsAdminUser|role.*==.*admin'
+          context: "**/*.py — Django views, DRF permissions, Flask decorators"
+      false_positive_hints:
+        - "Public endpoints that only need basic authentication"
+        - "Endpoints where all authenticated users should have access"
+    fix:
+      abstract: >
+        Use fine-grained role-based access control (RBAC) for sensitive
+        operations. Map each endpoint to the minimum required permission
+        level. Use allow-list patterns: check for the exact required role
+        rather than excluding known-bad roles.
+      templates:
+        go: |
+          // Before: any authenticated user can access admin endpoint
+          // if user.Role != "" {
+
+          // After: require specific admin role
+          func RequireRole(required string) gin.HandlerFunc {
+              return func(c *gin.Context) {
+                  user := GetCurrentUser(c)
+                  if user.Role != required {
+                      c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+                      return
+                  }
+                  c.Next()
+              }
+          }
+          admin.Use(RequireRole("admin"))
+        typescript: |
+          // Before: any logged-in user
+          // if (req.user) { /* admin action */ }
+
+          // After: explicit role check
+          function requireRole(role: string) {
+            return (req: Request, res: Response, next: NextFunction) => {
+              if (req.user?.role !== role) {
+                return res.status(403).json({ error: 'Insufficient permissions' });
+              }
+              next();
+            };
+          }
+          app.delete('/admin/users/:id', requireRole('admin'), deleteUser);
+    cases: ["H8"]
+
+  - id: "auth-flow/fail-open"
+    name: "Fail-Open Security Middleware"
+    description: "Security middleware passes the request through when an error occurs instead of blocking"
+    severity: CRITICAL
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify middleware or interceptor error-handling paths that call
+        next() or continue processing when a security check fails. When
+        a security control encounters an error (e.g., Redis down, token
+        parse failure), it should deny access rather than allow it.
+      tier: 2
+      rules:
+        go:
+          pattern: 'if\s+err\s*!=\s*nil\s*\{[^}]*c\.Next\(\)|if\s+err\s*!=\s*nil\s*\{[^}]*return\s+nil'
+          negative_pattern: 'c\.Abort|c\.AbortWithStatus|return\s+fmt\.Errorf|return\s+err'
+          context: "**/*.go — Gin/Echo/Fiber middleware, auth interceptors"
+        typescript:
+          pattern: 'catch\s*\([^)]*\)\s*\{[^}]*next\(\s*\)|\.catch\(\s*\(\)\s*=>\s*next\('
+          negative_pattern: 'next\(err\)|res\.status\(401\)|res\.status\(403\)|throw'
+          context: "**/*.ts — Express/Koa middleware, auth interceptors"
+        python:
+          pattern: 'except.*:\s*\n\s*pass|except.*:\s*\n\s*return\s+None|except.*:\s*\n\s*next'
+          negative_pattern: 'except.*:\s*\n\s*raise|except.*:\s*\n\s*return.*Response.*40[13]|abort\(40'
+          context: "**/*.py — Django/Flask middleware, auth decorators"
+      false_positive_hints:
+        - "Non-security middleware (logging, metrics) that should not block on error"
+        - "Middleware that logs the error and then aborts (check for abort after next)"
+    fix:
+      abstract: >
+        Ensure all security middleware follows the fail-closed pattern:
+        when any error occurs during a security check, deny the request.
+        Log the error for debugging but never let the request continue
+        without successful security validation.
+      templates:
+        go: |
+          // Before: fail-open — Redis down means everyone gets in
+          // if err != nil {
+          //     log.Error("auth check failed", err)
+          //     c.Next()  // DANGER: fail-open
+          // }
+
+          // After: fail-closed
+          if err != nil {
+              log.Error("auth check failed", zap.Error(err))
+              c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+                  "error": "security check unavailable",
+              })
+              return
+          }
+        typescript: |
+          // Before: fail-open
+          // } catch (err) {
+          //   console.error('Auth error', err);
+          //   next(); // DANGER
+          // }
+
+          // After: fail-closed
+          } catch (err) {
+            console.error('Auth error', err);
+            res.status(503).json({ error: 'Security check unavailable' });
+            return;
+          }
+    cases: ["H7"]

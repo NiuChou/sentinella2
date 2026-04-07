@@ -1,0 +1,120 @@
+# Information Leakage Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: info-leakage
+name: "Information Leakage Audit"
+description: "Audit for sensitive data in logs, error exposure, config leaks, and console leaks"
+
+pattern_refs:
+  - "info-leakage/sensitive-log"
+  - "info-leakage/error-exposure"
+  - "info-leakage/config-leak"
+  - "info-leakage/console-leak"
+
+prompt: |
+  Analyze the following code for information leakage vulnerabilities. Information
+  leakage occurs when the system exposes internal details, sensitive data, or
+  implementation specifics to unauthorized parties. These issues are often
+  overlooked because they don't directly enable exploitation, but they provide
+  attackers with reconnaissance data that makes other attacks easier.
+
+  ## Patterns to Check
+
+  ### 1. Sensitive Data in Logs [HIGH]
+
+  Look for logging statements that include PII, authentication tokens, passwords,
+  or other sensitive data fields.
+
+  Red flags:
+  - `log.Info("user login", "email", user.Email, "phone", user.Phone)`
+  - `console.log("auth token:", token)` or `logger.debug({password})`
+  - `logging.info(f"Payment for card {card_number}")`
+  - Request/response body logged at debug level without field filtering
+  - Error logs that include full request context (headers with Bearer tokens)
+  - Structured log fields named `token`, `password`, `secret`, `ssn`, `card`
+
+  FreeBSD SA-25:04 analog: Kernel debug messages leaked memory addresses,
+  enabling KASLR bypass. In application code, leaked tokens in logs enable
+  session hijacking by anyone with log access.
+
+  Real-world example: Structured logger included all request headers at debug
+  level. When debug logging was temporarily enabled in production to diagnose
+  an unrelated issue, all Bearer tokens were written to the centralized log
+  aggregator, accessible to the entire engineering team.
+
+  ### 2. Error Detail Exposure [MEDIUM]
+
+  Look for API handlers that return raw internal error messages to users.
+
+  Red flags:
+  - `res.json({ error: err.message })` exposing internal error details
+  - `c.JSON(500, gin.H{"error": err.Error()})` in Go handlers
+  - `jsonify({"error": str(e)})` in Python handlers
+  - Stack traces in production API responses
+  - Database error messages (table names, column names, SQL syntax)
+  - File paths in error messages (`/app/src/services/payment.go:142`)
+  - Library version info in error messages (`pg@8.7.1: connection refused`)
+
+  Information revealed to attackers:
+  - Database schema (table/column names from SQL errors)
+  - Internal service topology (hostnames from connection errors)
+  - Technology stack and versions (library names in stack traces)
+  - File system layout (paths in error messages)
+  - Business logic details (validation error specifics)
+
+  Real-world example: Payment endpoint returned the raw Stripe API error
+  including the Stripe secret key prefix in the error message. The error
+  was: `Invalid API Key provided: sk_live_...XXXX`.
+
+  ### 3. Configuration Secret Leak [CRITICAL]
+
+  Look for configuration files containing production secrets that are committed
+  to source control or served by web servers.
+
+  Red flags:
+  - `.env` files with real API keys committed to git
+  - `config.yaml` with `database_password: "actual-password"`
+  - `settings.py` with `SECRET_KEY = "hardcoded-value"`
+  - Docker Compose files with inline passwords
+  - Kubernetes Secrets in plain YAML (base64 is not encryption)
+  - `.env.production` not in `.gitignore`
+  - `credentials.json` for service accounts in repository
+  - Terraform state files with secrets committed to git
+
+  Real-world example: `.env` file with production database credentials was
+  committed early in the project. Despite being removed in a later commit,
+  the credentials remained in git history. Attacker used
+  `git log --all -- .env` to find them.
+
+  ### 4. Debug Console Logging in Production [LOW]
+
+  Look for debug logging statements left in production source code.
+
+  Red flags:
+  - `console.log()` in non-test source files
+  - `print()` statements in Python production code (not using logging module)
+  - `fmt.Println()` used for debugging instead of structured logger
+  - Debug-level logging enabled by default in production config
+  - Verbose logging of request/response payloads at info level
+  - `console.error()` used as a poor man's logger without log levels
+
+  Real-world example: Developer left `console.log("DEBUG user data:", user)`
+  in a React component. Sensitive user profile data was visible in browser
+  DevTools for every user who opened the page.
+
+  ## Additional Checks
+
+  Beyond the core patterns, also look for:
+  - Server headers leaking technology info (`X-Powered-By`, `Server`)
+  - Source maps deployed to production (expose original source)
+  - API documentation endpoints accessible in production (`/swagger`, `/graphql`)
+  - Directory listing enabled on file servers
+  - Git directory (`.git/`) accessible via web server
+  - Health check endpoints exposing version, build info, or dependency status
+
+  ## Code to Analyze
+
+  {code_context}

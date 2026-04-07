@@ -1,0 +1,311 @@
+# Input Boundary Validation Patterns
+# Category: input-boundary
+# Detects missing or insufficient input validation at system boundaries.
+# Source: perseworks 93-vulnerability audit + FreeBSD CVE-2026-4747 analysis.
+
+schema_version: "1.0"
+kind: PatternFile
+category: input-boundary
+
+patterns:
+  - id: "input-boundary/unbounded-read"
+    name: "Unbounded Read"
+    description: "Reading request body or stream without size limit allows memory exhaustion DoS"
+    severity: HIGH
+    owasp: ["A03"]
+    freebsd_sa: ["SA-26:08"]
+    detection:
+      abstract: >
+        Identify any code path that reads an entire request body, file upload,
+        or I/O stream into memory without enforcing a maximum size. The FreeBSD
+        CVE-2026-4747 analog: a 128-byte buffer accepted 400 bytes because no
+        bounds check existed on the read length.
+      tier: 1
+      rules:
+        go:
+          pattern: 'io\.ReadAll\(|ioutil\.ReadAll\('
+          negative_pattern: 'io\.LimitReader\(|http\.MaxBytesReader\(|\.Limit\('
+          context: "**/*.go — HTTP handlers, middleware, file processing"
+        typescript:
+          pattern: 'req\.body|request\.body|getRawBody\('
+          negative_pattern: 'express\.json\(\s*\{[^}]*limit|bodyParser\(\s*\{[^}]*limit|rawBody.*limit'
+          context: "**/*.ts — Express/Koa/Fastify route handlers and middleware"
+        python:
+          pattern: 'request\.data|request\.get_json\(\)|request\.stream\.read\(\)'
+          negative_pattern: 'MAX_CONTENT_LENGTH|content_length.*<|request\.content_length.*limit'
+          context: "**/*.py — Flask/Django/FastAPI request handlers"
+      false_positive_hints:
+        - "Reading small config files from disk (not user input) is acceptable"
+        - "Test fixtures that read known-size files can be ignored"
+        - "Functions wrapped in a size-limiting middleware at a higher level"
+    fix:
+      abstract: >
+        Wrap every unbounded read with a size-limiting reader before consuming
+        the stream. Set the limit to the maximum expected payload size plus a
+        small margin. Return 413 Payload Too Large when the limit is exceeded.
+      templates:
+        go: |
+          // Before: unbounded
+          // data, err := io.ReadAll(r.Body)
+
+          // After: bounded to 10 MB
+          limited := http.MaxBytesReader(w, r.Body, 10<<20)
+          data, err := io.ReadAll(limited)
+          if err != nil {
+              http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+              return
+          }
+        typescript: |
+          // Before: unbounded
+          // app.use(express.json())
+
+          // After: bounded to 10 MB
+          app.use(express.json({ limit: '10mb' }))
+    cases: ["M-upload", "M-body"]
+
+  - id: "input-boundary/blacklist-check"
+    name: "Blacklist Instead of Whitelist Validation"
+    description: "Using deny-list logic instead of allow-list permits unknown/future values to bypass checks"
+    severity: HIGH
+    owasp: ["A01"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify access control or validation logic that checks for known-bad
+        values (blacklist) rather than requiring known-good values (whitelist).
+        Any value not explicitly denied passes through, including values that
+        did not exist when the check was written.
+      tier: 2
+      rules:
+        go:
+          pattern: '!=\s*"blocked"|!=\s*"disabled"|!=\s*"banned"|!=\s*"inactive"|!=\s*"suspended"'
+          negative_pattern: '==\s*"active"|==\s*"approved"|==\s*"enabled"|==\s*"verified"'
+          context: "**/*.go — Authorization checks, status validation, role gates"
+        typescript:
+          pattern: '!==?\s*[''"]blocked[''"]|!==?\s*[''"]disabled[''"]|!==?\s*[''"]banned[''"]'
+          negative_pattern: '===?\s*[''"]active[''"]|===?\s*[''"]approved[''"]|\.includes\(.*allowList'
+          context: "**/*.ts — Auth middleware, status checks, role validation"
+        python:
+          pattern: '!=\s*[''"]blocked[''"]|!=\s*[''"]disabled[''"]|not\s+in\s+blocked_'
+          negative_pattern: '==\s*[''"]active[''"]|in\s+allowed_|in\s+whitelist|in\s+VALID_'
+          context: "**/*.py — Django/Flask auth decorators, permission checks"
+      false_positive_hints:
+        - "Logging or metrics code that checks status for display purposes"
+        - "Database queries that filter out archived records for UI display"
+    fix:
+      abstract: >
+        Replace deny-list checks with allow-list checks. Enumerate the exact
+        set of permitted values and reject everything else. This ensures new
+        or unknown values are denied by default.
+      templates:
+        go: |
+          // Before: blacklist — unknown statuses pass through
+          // if user.Status != "blocked" && user.Status != "suspended" {
+
+          // After: whitelist — only known-good values pass
+          allowedStatuses := map[string]bool{"active": true, "verified": true}
+          if !allowedStatuses[user.Status] {
+              return ErrUnauthorized
+          }
+        typescript: |
+          // Before: blacklist
+          // if (user.status !== 'blocked') {
+
+          // After: whitelist
+          const ALLOWED_STATUSES = new Set(['active', 'verified']);
+          if (!ALLOWED_STATUSES.has(user.status)) {
+            throw new ForbiddenError('Invalid account status');
+          }
+    cases: ["C7"]
+
+  - id: "input-boundary/missing-upload-validation"
+    name: "Missing File Upload Validation"
+    description: "File upload accepted without Content-Type or size validation allows malicious file injection"
+    severity: HIGH
+    owasp: ["A04"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify file upload handlers that accept files without validating
+        the MIME type, file extension, or file size. Missing validation allows
+        attackers to upload executable files, oversized files for DoS, or
+        files with mismatched extensions to bypass security controls.
+      tier: 1
+      rules:
+        go:
+          pattern: '\.FormFile\(|multipart\.Reader'
+          negative_pattern: '\.Header\.Get\("Content-Type"\)|\.Size\s*[<>]|DetectContentType|filetype\.Match'
+          context: "**/*.go — HTTP upload handlers, multipart form processing"
+        typescript:
+          pattern: 'multer\(|formidable\(|busboy|req\.file[s]?'
+          negative_pattern: 'fileFilter|limits.*fileSize|mimetype|allowedTypes|fileSize.*limit'
+          context: "**/*.ts — Express upload middleware configuration"
+        python:
+          pattern: 'request\.files|UploadFile|FileField'
+          negative_pattern: 'content_type.*in|allowed_extensions|validate_file|max_upload_size|FILE_UPLOAD_MAX'
+          context: "**/*.py — Flask/Django/FastAPI file upload endpoints"
+      false_positive_hints:
+        - "Upload handlers in admin-only endpoints with separate auth controls"
+        - "Test utilities that handle file fixtures"
+    fix:
+      abstract: >
+        Validate Content-Type against an allow-list of expected MIME types,
+        enforce a maximum file size, and verify the file signature (magic bytes)
+        matches the declared Content-Type. Never trust the client-provided
+        Content-Type header alone.
+      templates:
+        go: |
+          file, header, err := r.FormFile("upload")
+          if err != nil {
+              return fmt.Errorf("upload read: %w", err)
+          }
+          defer file.Close()
+
+          // Validate size
+          if header.Size > maxUploadSize {
+              return ErrFileTooLarge
+          }
+
+          // Validate content type via magic bytes
+          buf := make([]byte, 512)
+          if _, err := file.Read(buf); err != nil {
+              return fmt.Errorf("upload read header: %w", err)
+          }
+          contentType := http.DetectContentType(buf)
+          if !allowedTypes[contentType] {
+              return ErrInvalidFileType
+          }
+        typescript: |
+          const upload = multer({
+            limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+            fileFilter: (_req, file, cb) => {
+              const allowed = ['image/jpeg', 'image/png', 'application/pdf'];
+              if (!allowed.includes(file.mimetype)) {
+                return cb(new Error('Invalid file type'));
+              }
+              cb(null, true);
+            },
+          });
+    cases: []
+
+  - id: "input-boundary/missing-range-check"
+    name: "Missing Numeric Range Check"
+    description: "Numeric parameters accepted from user input without min/max bounds validation"
+    severity: MEDIUM
+    owasp: ["A03"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify numeric values parsed from query strings, form fields, or
+        JSON bodies that are used in database queries, pagination, or business
+        logic without validating that they fall within acceptable bounds.
+        Unbounded page sizes can dump entire tables; unbounded offsets can
+        cause integer overflow.
+      tier: 2
+      rules:
+        go:
+          pattern: 'strconv\.Atoi\(.*Query|strconv\.ParseInt\(.*Query|\.QueryInt\(|\.DefaultQuery\('
+          negative_pattern: 'if\s+\w+\s*[<>]|math\.Min|math\.Max|clamp|validateRange|maxPageSize'
+          context: "**/*.go — HTTP handlers that parse query/form params into numbers"
+        typescript:
+          pattern: 'parseInt\(req\.query|Number\(req\.query|parseFloat\(req\.query|\+req\.query'
+          negative_pattern: 'Math\.min|Math\.max|clamp|validateRange|isNaN.*return|MAX_PAGE_SIZE'
+          context: "**/*.ts — Express/Koa route handlers parsing query params"
+        python:
+          pattern: 'int\(request\.args|int\(request\.GET|request\.query_params.*int'
+          negative_pattern: 'min\(|max\(|clamp|validate_range|MAX_PAGE_SIZE|PAGINATION_LIMIT'
+          context: "**/*.py — Flask/Django view functions parsing query params"
+      false_positive_hints:
+        - "IDs parsed from URL path params that are validated by the ORM lookup"
+        - "Enum-like values that are validated by a switch/match statement"
+    fix:
+      abstract: >
+        Clamp all numeric inputs to defined minimum and maximum bounds
+        immediately after parsing. Define constants for pagination limits
+        and business rule boundaries. Return 400 Bad Request for values
+        outside the acceptable range.
+      templates:
+        go: |
+          const (
+              minPageSize = 1
+              maxPageSize = 100
+              defaultPageSize = 20
+          )
+
+          pageSizeStr := r.URL.Query().Get("page_size")
+          pageSize, err := strconv.Atoi(pageSizeStr)
+          if err != nil || pageSize < minPageSize {
+              pageSize = defaultPageSize
+          }
+          if pageSize > maxPageSize {
+              pageSize = maxPageSize
+          }
+        typescript: |
+          const MIN_PAGE_SIZE = 1;
+          const MAX_PAGE_SIZE = 100;
+          const DEFAULT_PAGE_SIZE = 20;
+
+          const raw = parseInt(req.query.page_size as string, 10);
+          const pageSize = Number.isNaN(raw)
+            ? DEFAULT_PAGE_SIZE
+            : Math.max(MIN_PAGE_SIZE, Math.min(MAX_PAGE_SIZE, raw));
+    cases: ["L-analytics"]
+
+  - id: "input-boundary/missing-body-limit"
+    name: "Missing HTTP Body Size Limit"
+    description: "HTTP server accepts requests without body size limit middleware, enabling DoS via large payloads"
+    severity: HIGH
+    owasp: ["A03"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify HTTP server setup that lacks global body size limiting
+        middleware. Without a server-wide limit, any endpoint that reads
+        the body is vulnerable to memory exhaustion attacks, even if
+        individual handlers are careful.
+      tier: 1
+      rules:
+        go:
+          pattern: 'gin\.Default\(\)|gin\.New\(\)|echo\.New\(\)|fiber\.New\(\)|http\.ListenAndServe'
+          negative_pattern: 'MaxBytesReader|BodyLimit|MaxBodySize|maxBytes|bodyLimit|LimitRequestBody'
+          context: "**/*.go — Server initialization, router setup, middleware chain"
+        typescript:
+          pattern: 'express\(\)|new\s+Koa\(\)|fastify\(\)|createServer\('
+          negative_pattern: 'express\.json\(\s*\{[^}]*limit|bodyParser.*limit|rawBody.*limit|bodyLimit'
+          context: "**/*.ts — Server bootstrap files, app initialization"
+        python:
+          pattern: 'Flask\(__name__|Django|FastAPI\(\)'
+          negative_pattern: 'MAX_CONTENT_LENGTH|DATA_UPLOAD_MAX|RequestSizeLimitMiddleware'
+          context: "**/*.py — App factory, settings module, WSGI/ASGI setup"
+      false_positive_hints:
+        - "Internal services behind a reverse proxy that enforces body limits"
+        - "gRPC servers that use protobuf message size limits instead"
+    fix:
+      abstract: >
+        Add body size limit middleware at the server level so all endpoints
+        are protected by default. Set the limit to the maximum expected
+        payload size for the application. Individual endpoints that need
+        larger payloads can override with a higher limit.
+      templates:
+        go: |
+          // Gin: add body limit middleware
+          r := gin.Default()
+          r.Use(func(c *gin.Context) {
+              c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
+              c.Next()
+          })
+
+          // Echo: built-in body limit
+          e := echo.New()
+          e.Use(middleware.BodyLimit("10M"))
+
+          // Fiber: built-in body limit
+          app := fiber.New(fiber.Config{
+              BodyLimit: 10 * 1024 * 1024,
+          })
+        typescript: |
+          // Express: set global body limit
+          const app = express();
+          app.use(express.json({ limit: '10mb' }));
+          app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+    cases: []

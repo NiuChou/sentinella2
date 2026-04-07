@@ -1,0 +1,118 @@
+# Security Control Resilience Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: resilience
+name: "Security Control Resilience Audit"
+description: "Audit for degradation, bypass, or silent failure of security controls"
+
+pattern_refs:
+  - "resilience/fail-open-middleware"
+  - "resilience/unenforced-limit"
+  - "resilience/audit-drop"
+  - "resilience/resource-leak"
+
+prompt: |
+  Analyze the following code for security control resilience vulnerabilities.
+  Resilience means security controls continue to work under adverse conditions:
+  dependency failures, resource exhaustion, and high load. A security control
+  that fails silently is worse than no control at all because it creates a
+  false sense of security.
+
+  ## Patterns to Check
+
+  ### 1. Fail-Open Security Middleware [CRITICAL]
+
+  Look for security middleware that defaults to allow when the backing service
+  or verification check fails.
+
+  Red flags:
+  - `if err != nil { c.Next() }` in auth middleware (Go/Gin)
+  - `catch (err) { next() }` in Express middleware (no error forwarded)
+  - `except: pass` or `except: return None` in Python auth decorators
+  - Token parse failure falling through to the success code path
+  - Redis/DB timeout in rate limiter causing requests to pass through
+  - Circuit breaker in open state allowing all requests instead of denying
+
+  FreeBSD SA-25:07 analog: blocklistd leaked file descriptors, causing the
+  block list to fail open. New malicious connections were no longer blocked
+  because the enforcement mechanism silently degraded.
+
+  Real-world example: Auth middleware caught Redis connection errors and called
+  `next()` to "not break the user experience". A Redis outage disabled
+  authentication for the entire application for 47 minutes.
+
+  ### 2. Unenforced Rate Limit or Quota [HIGH]
+
+  Look for rate limit or quota configurations that exist but are never actually
+  enforced by the request pipeline.
+
+  Red flags:
+  - Rate limit values in config/env vars but no middleware consuming them
+  - Rate limiter instantiated but never registered on the router
+  - Rate limit middleware imported but commented out
+  - `rateLimit` config key exists but `app.use(rateLimiter)` is missing
+  - Rate limiter in logging-only mode (counts but never rejects)
+  - Different rate limit config for API and WebSocket but only API enforced
+
+  FreeBSD SA-25:07 analog: blocklistd tracked offenders in its database but
+  leaked FDs so the pf rules were never applied to new connections. The
+  configuration existed but enforcement was broken.
+
+  Real-world example: Config had `RATE_LIMIT_MAX=100` and the rate limiter was
+  instantiated, but `app.use(limiter)` was on a commented-out line from a
+  "temporary" debugging session 6 months ago.
+
+  ### 3. Silent Audit Log Drop [HIGH]
+
+  Look for security audit log entries that are silently discarded when the log
+  sink encounters an error.
+
+  Red flags:
+  - `auditLog.Write()` with error return value ignored
+  - `audit.log()` without `.catch()` handler (unhandled rejection)
+  - Async audit logging without dead letter queue or retry mechanism
+  - `go auditLog.Write(event)` without error channel (fire-and-forget goroutine)
+  - Audit log buffer that silently drops entries when full (ring buffer)
+  - No monitoring or alerting on audit pipeline health
+
+  Real-world example: Audit logger used a goroutine to write to Elasticsearch.
+  When ES was down, events were silently dropped. A data breach went undetected
+  for 3 weeks because the audit trail had a gap during the incident window.
+
+  ### 4. Resource Leak Degrading Security Controls [HIGH]
+
+  Look for leaked goroutines, connections, or file descriptors that cause
+  security controls to fail over time.
+
+  Red flags:
+  - Goroutines without context cancellation or done channels
+  - `go func()` with infinite loop and no exit condition
+  - `time.NewTicker` without `defer ticker.Stop()`
+  - `setInterval` without corresponding `clearInterval` on cleanup
+  - Database connections not returned to pool on error paths
+  - HTTP response bodies not closed (`defer resp.Body.Close()` missing)
+  - File descriptors opened in a loop without close
+
+  FreeBSD SA-25:07 analog: blocklistd leaked file descriptors until it could
+  no longer open sockets to enforce blocks. The service appeared healthy
+  (process running, port listening) but was functionally dead.
+
+  Real-world example: Each failed auth attempt spawned a goroutine to log
+  the event. The goroutine blocked on a full channel and never exited.
+  After 50k failed login attempts, the service had 50k leaked goroutines
+  consuming 4GB of memory, causing OOM and cascading auth failures.
+
+  ## Cross-Cutting Concerns
+
+  When analyzing resilience, also check:
+  - Health check endpoints that return 200 even when security controls are degraded
+  - Graceful degradation that degrades security instead of functionality
+  - Retry logic that retries security-sensitive operations without idempotency
+  - Timeout configurations that are too generous (allow slowloris attacks)
+
+  ## Code to Analyze
+
+  {code_context}

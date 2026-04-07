@@ -1,0 +1,11 @@
+{
+  "_comment": "Add to .claude/settings.json to run sentinella2 after every file edit",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": { "tool": "Write|Edit" },
+        "command": "sentinella2 scan --changed-only --quiet"
+      }
+    ]
+  }
+}

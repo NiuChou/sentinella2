@@ -1,0 +1,105 @@
+# Pattern Schema Definition
+# Defines the structure for vulnerability pattern YAML files.
+# Each pattern file contains a category with multiple detection entries.
+
+schema_version: "1.0"
+kind: PatternSchema
+
+fields:
+  id:
+    type: string
+    required: true
+    description: "Unique pattern identifier in category/name format"
+    example: "input-boundary/unbounded-read"
+
+  name:
+    type: string
+    required: true
+    description: "Human-readable pattern name"
+    example: "Unbounded Read"
+
+  description:
+    type: string
+    required: true
+    description: "One-line description of the vulnerability pattern"
+
+  severity:
+    type: enum
+    required: true
+    values: ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    description: "Impact severity when this pattern is found"
+
+  owasp:
+    type: string[]
+    required: false
+    description: "OWASP Top 10 category references"
+    example: ["A01", "A03"]
+
+  freebsd_sa:
+    type: string[]
+    required: false
+    description: "FreeBSD Security Advisory references"
+    example: ["SA-26:08", "SA-25:07"]
+
+  detection:
+    type: object
+    required: true
+    fields:
+      abstract:
+        type: string
+        required: true
+        description: "Language-agnostic detection description for LLM prompts"
+
+      tier:
+        type: enum
+        required: true
+        values: [1, 2, 3]
+        description: >
+          Detection difficulty tier:
+          1 = Deterministic (regex match, zero-config)
+          2 = Structural (requires AST or multi-line context)
+          3 = Semantic (requires LLM reasoning about intent)
+
+      rules:
+        type: map
+        required: false
+        description: "Per-language detection rules keyed by language name"
+        value_schema:
+          pattern:
+            type: string
+            required: true
+            description: "Regex pattern that indicates the vulnerability"
+          negative_pattern:
+            type: string
+            required: true
+            description: "Regex pattern that indicates the issue is already mitigated"
+          context:
+            type: string
+            required: true
+            description: "Where to look — file glob or code region hint"
+
+      false_positive_hints:
+        type: string[]
+        required: false
+        description: "Hints for reducing false positives during detection"
+
+  fix:
+    type: object
+    required: true
+    fields:
+      abstract:
+        type: string
+        required: true
+        description: "Language-agnostic fix description"
+      templates:
+        type: map
+        required: false
+        description: "Per-language fix code templates keyed by language name"
+        value_schema:
+          type: string
+
+  cases:
+    type: string[]
+    required: false
+    description: "References to case IDs from the cases knowledge base"
+    example: ["C1", "C2"]

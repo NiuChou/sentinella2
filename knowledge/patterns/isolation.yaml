@@ -1,0 +1,256 @@
+# Isolation Boundary Patterns
+# Category: isolation
+# Detects missing or broken isolation controls in container and cluster environments.
+# Source: perseworks 93-vulnerability audit + FreeBSD SA-26:02, SA-26:04 analysis.
+
+schema_version: "1.0"
+kind: PatternFile
+category: isolation
+
+patterns:
+  - id: "isolation/shared-namespace"
+    name: "Shared Kubernetes Namespace"
+    description: "All services deployed in the same K8s namespace, preventing blast radius containment"
+    severity: HIGH
+    owasp: ["A05"]
+    freebsd_sa: ["SA-26:04"]
+    detection:
+      abstract: >
+        Identify Kubernetes deployments where all services share a single
+        namespace (typically "default") instead of being separated by
+        security boundary. The FreeBSD SA-26:04 analog: jail escape was
+        possible because isolation boundaries were not enforced between
+        workloads.
+      tier: 1
+      rules:
+        go:
+          pattern: 'namespace:\s*"default"|Namespace:\s*"default"|namespace.*default'
+          negative_pattern: 'namespace:\s*"[a-z]+-(?:prod|staging|system)"|Namespace:\s*"[a-z]+-'
+          context: "**/*.go — K8s client code, deployment helpers"
+        typescript:
+          pattern: 'namespace:\s*[''"]default[''"]|namespace.*default'
+          negative_pattern: 'namespace:\s*[''"][a-z]+-(?:prod|staging|system)[''"]'
+          context: "**/*.ts — K8s client libraries, deployment scripts"
+        python:
+          pattern: 'namespace=[''"]default[''"]|namespace.*=.*default'
+          negative_pattern: 'namespace=[''"][a-z]+-(?:prod|staging|system)[''"]'
+          context: "**/*.py — K8s client code, deployment automation"
+      false_positive_hints:
+        - "Development-only local K8s manifests (minikube, kind)"
+        - "Namespace definition files that create non-default namespaces"
+        - "Cluster-scoped resources that do not belong to a namespace"
+    fix:
+      abstract: >
+        Separate services into dedicated namespaces based on security
+        boundaries. At minimum, separate by trust level: public-facing
+        services, internal services, and data-plane services should each
+        have their own namespace with appropriate RBAC and NetworkPolicy.
+      templates:
+        go: |
+          // Define namespaces per service boundary
+          const (
+              NamespaceGateway  = "gateway-prod"
+              NamespacePayment  = "payment-prod"
+              NamespaceInternal = "internal-prod"
+          )
+
+          // Use service-specific namespace in deployments
+          deployment.Namespace = NamespacePayment
+        typescript: |
+          // Namespace per service boundary
+          const NAMESPACES = {
+            gateway: 'gateway-prod',
+            payment: 'payment-prod',
+            internal: 'internal-prod',
+          } as const;
+    cases: ["H17", "M-ns"]
+
+  - id: "isolation/writable-rootfs"
+    name: "Writable Root Filesystem in Container"
+    description: "Container runs without readOnlyRootFilesystem, allowing attacker persistence via file writes"
+    severity: HIGH
+    owasp: ["A05"]
+    freebsd_sa: ["SA-26:02"]
+    detection:
+      abstract: >
+        Identify container or pod specifications that do not set
+        readOnlyRootFilesystem to true. A writable root filesystem allows
+        an attacker who achieves code execution to install tools, modify
+        binaries, or persist malware. The FreeBSD SA-26:02 analog: writable
+        filesystem allowed persistent jail compromise.
+      tier: 1
+      rules:
+        go:
+          pattern: 'SecurityContext\s*:\s*&?v1\.SecurityContext\{|PodSecurityContext\{'
+          negative_pattern: 'ReadOnlyRootFilesystem:\s*(?:&?)?true|readOnlyRootFilesystem:\s*true'
+          context: "**/*.go — K8s pod spec construction, deployment builders"
+        typescript:
+          pattern: 'securityContext|SecurityContext|containers:\s*\['
+          negative_pattern: 'readOnlyRootFilesystem:\s*true|readOnlyRootFilesystem.*true'
+          context: "**/*.ts — K8s manifest generators, Helm chart templates"
+        python:
+          pattern: 'security_context|SecurityContext|V1SecurityContext'
+          negative_pattern: 'read_only_root_filesystem=True|readOnlyRootFilesystem.*true'
+          context: "**/*.py — K8s Python client pod specs, deployment scripts"
+      false_positive_hints:
+        - "Init containers that need to write to shared volumes"
+        - "Pod specs that use emptyDir volumes for writable paths instead"
+        - "CI/CD build containers that are ephemeral by design"
+    fix:
+      abstract: >
+        Set readOnlyRootFilesystem to true on all containers. Use emptyDir
+        volumes for paths that require write access (e.g., /tmp, /var/run).
+        This prevents an attacker from modifying system binaries or
+        installing persistence mechanisms.
+      templates:
+        go: |
+          securityContext := &v1.SecurityContext{
+              ReadOnlyRootFilesystem:   boolPtr(true),
+              RunAsNonRoot:             boolPtr(true),
+              AllowPrivilegeEscalation: boolPtr(false),
+          }
+
+          // Mount emptyDir for paths that need writes
+          volumes := []v1.Volume{{
+              Name: "tmp",
+              VolumeSource: v1.VolumeSource{
+                  EmptyDir: &v1.EmptyDirVolumeSource{
+                      SizeLimit: resource.NewQuantity(100*1024*1024, resource.BinarySI),
+                  },
+              },
+          }}
+        typescript: |
+          const container = {
+            securityContext: {
+              readOnlyRootFilesystem: true,
+              runAsNonRoot: true,
+              allowPrivilegeEscalation: false,
+            },
+            volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
+          };
+          const volumes = [{ name: 'tmp', emptyDir: { sizeLimit: '100Mi' } }];
+    cases: ["M-rootfs"]
+
+  - id: "isolation/excessive-perms"
+    name: "Excessive Default Permissions"
+    description: "Container or service account runs with excessive permissions (root, default SA, no RBAC)"
+    severity: HIGH
+    owasp: ["A05"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify containers running as root, using the default service
+        account, or without explicit RBAC role bindings. Default service
+        accounts in Kubernetes have auto-mounted API tokens that may grant
+        cluster-wide read access. Running as root means any container
+        escape gives host-level privileges.
+      tier: 1
+      rules:
+        go:
+          pattern: 'RunAsUser:\s*(?:&?)?int64Ptr\(0\)|serviceAccountName:\s*"default"|automountServiceAccountToken.*true'
+          negative_pattern: 'RunAsNonRoot:\s*(?:&?)?true|serviceAccountName:\s*"[a-z]+-sa"|AutomountServiceAccountToken.*false'
+          context: "**/*.go — K8s pod specs, deployment configurations"
+        typescript:
+          pattern: 'runAsUser:\s*0|serviceAccountName:\s*[''"]default[''"]|automountServiceAccountToken:\s*true'
+          negative_pattern: 'runAsNonRoot:\s*true|serviceAccountName:\s*[''"][a-z]+-sa[''"]|automountServiceAccountToken:\s*false'
+          context: "**/*.ts — K8s manifests, Helm values, deployment scripts"
+        python:
+          pattern: 'run_as_user=0|service_account_name=[''"]default[''"]|automount_service_account_token=True'
+          negative_pattern: 'run_as_non_root=True|service_account_name=[''"][a-z]+-sa[''"]|automount_service_account_token=False'
+          context: "**/*.py — K8s Python client, deployment automation"
+      false_positive_hints:
+        - "System-level pods (kube-system) that legitimately need elevated privileges"
+        - "Init containers that run as root to set file permissions, then exit"
+        - "Development clusters with relaxed security policies"
+    fix:
+      abstract: >
+        Run all containers as non-root with a dedicated service account.
+        Disable automounting of the default service account token. Create
+        minimal RBAC roles scoped to only the resources each service needs.
+      templates:
+        go: |
+          podSpec := &v1.PodSpec{
+              ServiceAccountName:           "payment-svc-sa",
+              AutomountServiceAccountToken: boolPtr(false),
+              SecurityContext: &v1.PodSecurityContext{
+                  RunAsNonRoot: boolPtr(true),
+                  RunAsUser:    int64Ptr(1000),
+                  FSGroup:      int64Ptr(1000),
+              },
+          }
+        typescript: |
+          const podSpec = {
+            serviceAccountName: 'payment-svc-sa',
+            automountServiceAccountToken: false,
+            securityContext: {
+              runAsNonRoot: true,
+              runAsUser: 1000,
+              fsGroup: 1000,
+            },
+          };
+    cases: ["M-sa", "C3"]
+
+  - id: "isolation/missing-network-policy"
+    name: "Missing Kubernetes Network Policy"
+    description: "No NetworkPolicy resources defined, allowing unrestricted pod-to-pod communication"
+    severity: HIGH
+    owasp: ["A05"]
+    freebsd_sa: ["SA-26:04"]
+    detection:
+      abstract: >
+        Identify Kubernetes clusters or namespaces that lack NetworkPolicy
+        resources. Without network policies, any pod can communicate with
+        any other pod across all namespaces, including direct access to
+        databases and internal services. The FreeBSD SA-26:04 analog:
+        lack of network isolation between jails enabled lateral movement.
+      tier: 1
+      rules:
+        go:
+          pattern: 'apps/v1.*Deployment|networking\.k8s\.io|NetworkingV1\(\)'
+          negative_pattern: 'NetworkPolicy|networkpolicy|network-policy|NetworkPolicySpec'
+          context: "**/*.go — K8s deployment code, cluster setup, infrastructure provisioning"
+        typescript:
+          pattern: 'kind:\s*[''"]?Deployment|apiVersion.*apps/v1'
+          negative_pattern: 'kind:\s*[''"]?NetworkPolicy|NetworkPolicy|networkPolicy'
+          context: "**/*.ts — K8s manifest generators, infrastructure code"
+        python:
+          pattern: 'V1Deployment|create_namespaced_deployment|apps_v1'
+          negative_pattern: 'V1NetworkPolicy|create_namespaced_network_policy|network_policy'
+          context: "**/*.py — K8s Python client, deployment automation"
+      false_positive_hints:
+        - "Clusters using a service mesh (Istio, Linkerd) for network isolation"
+        - "Development clusters where network policies are intentionally relaxed"
+        - "Infrastructure code that creates NetworkPolicy in a separate module"
+    fix:
+      abstract: >
+        Define a default-deny NetworkPolicy for each namespace and then
+        create explicit allow rules for required communication paths.
+        Start with deny-all ingress and egress, then incrementally add
+        rules for legitimate traffic flows.
+      templates:
+        go: |
+          // Default deny all ingress and egress
+          defaultDeny := &networkingv1.NetworkPolicy{
+              ObjectMeta: metav1.ObjectMeta{
+                  Name:      "default-deny-all",
+                  Namespace: "payment-prod",
+              },
+              Spec: networkingv1.NetworkPolicySpec{
+                  PodSelector: metav1.LabelSelector{}, // Selects all pods
+                  PolicyTypes: []networkingv1.PolicyType{
+                      networkingv1.PolicyTypeIngress,
+                      networkingv1.PolicyTypeEgress,
+                  },
+              },
+          }
+        typescript: |
+          const defaultDeny = {
+            apiVersion: 'networking.k8s.io/v1',
+            kind: 'NetworkPolicy',
+            metadata: { name: 'default-deny-all', namespace: 'payment-prod' },
+            spec: {
+              podSelector: {},
+              policyTypes: ['Ingress', 'Egress'],
+            },
+          };
+    cases: ["M-netpol"]

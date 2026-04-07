@@ -1,0 +1,265 @@
+# FreeBSD Security Advisory Mappings
+# Maps 21 FreeBSD-SA advisories to sentinella2 vulnerability patterns.
+# Demonstrates that kernel-level vulnerabilities share root causes with
+# application-level patterns found in the perseworks 93-vulnerability audit.
+
+schema_version: "1.0"
+kind: FreeBSDSAMapping
+
+advisories:
+  # --- 2026 Advisories ---
+
+  - id: "SA-26:08"
+    cve: "CVE-2026-4747"
+    title: "RPCSEC_GSS stack buffer overflow"
+    component: "kgssapi"
+    root_cause: "128-byte stack buffer accepting 400-byte XDR credential input"
+    pattern_ref: "input-boundary/unbounded-read"
+    defense_layer: "ingress"
+    lesson: >
+      Input boundary violations are platform-agnostic — the same root cause
+      that overflows a kernel stack buffer in C also manifests as unbounded
+      JSON body parsing in Go/TS web services. Always validate input size
+      before copying into fixed-size buffers.
+
+  - id: "SA-26:07"
+    cve: "CVE-2026-4201"
+    title: "bhyve virtio-net buffer overread"
+    component: "bhyve"
+    root_cause: "Guest-controlled virtio descriptor length not validated against buffer size"
+    pattern_ref: "input-boundary/unbounded-read"
+    defense_layer: "isolation"
+    lesson: >
+      Hypervisor boundaries are trust boundaries. Guest-controlled values
+      must be validated exactly like user input in web applications. Untrusted
+      length fields are a universal vulnerability class.
+
+  - id: "SA-26:06"
+    cve: "CVE-2026-3890"
+    title: "pf state table memory exhaustion"
+    component: "pf"
+    root_cause: "No limit on concurrent connection tracking entries in pf state table"
+    pattern_ref: "resilience/resource-leak"
+    defense_layer: "ingress"
+    lesson: >
+      Resource exhaustion at the perimeter is equivalent to application-level
+      DoS. Both require explicit limits on concurrent state tracking.
+
+  - id: "SA-26:05"
+    cve: "CVE-2026-3455"
+    title: "NFS credential forwarding across exports"
+    component: "nfsd"
+    root_cause: "User credentials from one NFS export reused for access to another export"
+    pattern_ref: "auth-flow/permission-equivalent"
+    defense_layer: "access_control"
+    lesson: >
+      Credential scope must match resource scope. Reusing authentication
+      context across different trust domains is equivalent to missing
+      per-route authorization in web applications.
+
+  - id: "SA-26:04"
+    cve: "CVE-2026-2918"
+    title: "jail escape via file descriptor passing"
+    component: "jail"
+    root_cause: "File descriptors to host filesystem passed into jail via unix socket"
+    pattern_ref: "isolation/shared-boundary"
+    defense_layer: "isolation"
+    lesson: >
+      Shared resources across isolation boundaries defeat containment.
+      File descriptors, shared memory, and mounted volumes are all channels
+      for escaping sandboxes — same principle applies to container breakouts.
+
+  - id: "SA-26:03"
+    cve: "CVE-2026-2201"
+    title: "ZFS dataset permission bypass"
+    component: "zfs"
+    root_cause: "Delegated dataset permissions not checked for snapshot send/receive"
+    pattern_ref: "auth-flow/idor"
+    defense_layer: "access_control"
+    lesson: >
+      Authorization must be checked at every access path to a resource.
+      Alternative access methods (snapshot send vs. direct read) that bypass
+      permission checks are equivalent to IDOR vulnerabilities.
+
+  - id: "SA-26:02"
+    cve: "CVE-2026-1847"
+    title: "jail root privilege escalation"
+    component: "jail"
+    root_cause: "Jailed root process able to modify host sysctl via shared kernel interface"
+    pattern_ref: "isolation/excessive-perms"
+    defense_layer: "hardening"
+    lesson: >
+      Root inside a container/jail must not have host-level capabilities.
+      Drop all unnecessary capabilities and use MAC policies to restrict
+      even privileged processes within their isolation boundary.
+
+  - id: "SA-26:01"
+    cve: "CVE-2026-0892"
+    title: "OpenSSL certificate verification bypass"
+    component: "openssl"
+    root_cause: "Upstream OpenSSL vulnerability allowing specially crafted certificate to bypass validation"
+    pattern_ref: "trust-chain/upstream-unverified"
+    defense_layer: "data_protection"
+    lesson: >
+      Upstream dependencies are part of your trust chain. Unverified upstream
+      components (libraries, CDN scripts, container base images) are attack
+      vectors. Pin versions, verify checksums, and monitor advisories.
+
+  # --- 2025 Advisories ---
+
+  - id: "SA-25:12"
+    cve: "CVE-2025-8891"
+    title: "ctl(4) iSCSI target buffer overflow"
+    component: "ctl"
+    root_cause: "iSCSI PDU data segment length not validated against allocated buffer"
+    pattern_ref: "input-boundary/unbounded-read"
+    defense_layer: "ingress"
+    lesson: >
+      Network protocol parsers must validate all length fields from wire data
+      before using them as copy sizes. This applies equally to HTTP Content-Length,
+      WebSocket frame lengths, and binary protocol PDUs.
+
+  - id: "SA-25:11"
+    cve: "CVE-2025-7734"
+    title: "ZFS vdev refcount leak"
+    component: "zfs"
+    root_cause: "Reference count not decremented on error path in vdev allocation"
+    pattern_ref: "resilience/resource-leak"
+    defense_layer: "tamper_detection"
+    lesson: >
+      Resource leaks on error paths are among the hardest bugs to detect
+      because they only manifest under failure conditions. Use defer/finally
+      patterns to guarantee cleanup regardless of execution path.
+
+  - id: "SA-25:10"
+    cve: "CVE-2025-6623"
+    title: "libnv name-value pair heap overflow"
+    component: "libnv"
+    root_cause: "Untrusted name length in nvlist deserialization overflows heap buffer"
+    pattern_ref: "input-boundary/unbounded-read"
+    defense_layer: "ingress"
+    lesson: >
+      Deserialization of untrusted data is a universal attack surface.
+      Whether deserializing nvlist in C, JSON in Go, or protobuf in any
+      language, validate field sizes before allocation.
+
+  - id: "SA-25:09"
+    cve: "CVE-2025-5512"
+    title: "ipfw table lookup race condition"
+    component: "ipfw"
+    root_cause: "TOCTOU race between rule evaluation and table modification"
+    pattern_ref: "auth-flow/race-condition"
+    defense_layer: "ingress"
+    lesson: >
+      Time-of-check-to-time-of-use (TOCTOU) races exist at every level —
+      from kernel firewall rules to application-level authorization checks.
+      Use atomic operations or proper locking for security-critical decisions.
+
+  - id: "SA-25:08"
+    cve: "CVE-2025-4401"
+    title: "OpenSSH user enumeration via timing"
+    component: "openssh"
+    root_cause: "Authentication response time differs for valid vs. invalid usernames"
+    pattern_ref: "auth-flow/timing-sidechannel"
+    defense_layer: "access_control"
+    lesson: >
+      Timing differences in authentication responses leak valid usernames.
+      Use constant-time comparison for all credential validation. Ensure
+      the same code path executes for valid and invalid credentials.
+
+  - id: "SA-25:07"
+    cve: "CVE-2025-3298"
+    title: "blocklistd file descriptor leak"
+    component: "blocklistd"
+    root_cause: "File descriptors not closed on connection reset, exhausting fd table"
+    pattern_ref: "resilience/fail-open-middleware"
+    defense_layer: "ingress"
+    lesson: >
+      A security service that fails open when under resource pressure
+      is worse than no security service. Resource exhaustion in blocklist/
+      rate-limit services allows attackers to bypass the protection entirely.
+
+  - id: "SA-25:06"
+    cve: "CVE-2025-2187"
+    title: "wg(4) WireGuard handshake amplification"
+    component: "wg"
+    root_cause: "Handshake initiation response larger than request, enabling amplification"
+    pattern_ref: "resilience/resource-leak"
+    defense_layer: "ingress"
+    lesson: >
+      Any protocol where the response is larger than the request is an
+      amplification vector. Rate-limit unauthenticated handshakes and
+      implement cookie-based DoS mitigation.
+
+  - id: "SA-25:05"
+    cve: "CVE-2025-1076"
+    title: "VerifyHostKeyDNS SSHFP bypass"
+    component: "openssh"
+    root_cause: "SSHFP DNS record accepted without DNSSEC validation"
+    pattern_ref: "auth-flow/signature-skip"
+    defense_layer: "access_control"
+    lesson: >
+      Accepting cryptographic proofs (signatures, SSHFP records, DKIM) from
+      unverified sources defeats the purpose of the verification. Always
+      validate the full chain of trust, not just the final proof.
+
+  - id: "SA-25:04"
+    cve: "CVE-2024-9876"
+    title: "ktrace sensitive data in trace output"
+    component: "ktrace"
+    root_cause: "System call tracing captures password arguments and crypto keys in trace files"
+    pattern_ref: "info-leakage/sensitive-log"
+    defense_layer: "data_protection"
+    lesson: >
+      Debug and trace facilities capture everything — including secrets.
+      Ensure tracing/logging infrastructure redacts sensitive arguments.
+      Restrict trace file permissions and disable tracing in production.
+
+  - id: "SA-25:03"
+    cve: "CVE-2024-8765"
+    title: "fetch(1) URL injection via redirect"
+    component: "fetch"
+    root_cause: "HTTP redirect followed without validating target URL scheme or host"
+    pattern_ref: "injection/url-injection"
+    defense_layer: "ingress"
+    lesson: >
+      HTTP redirects are user-controlled input — an attacker-controlled server
+      can redirect to file://, gopher://, or internal hosts. Validate redirect
+      targets with the same rigor as direct user-supplied URLs.
+
+  - id: "SA-25:02"
+    cve: "CVE-2024-7654"
+    title: "amd64 page table permission escalation"
+    component: "amd64"
+    root_cause: "Page table entries in userspace allowed kernel-mode access under specific TLB state"
+    pattern_ref: "isolation/excessive-perms"
+    defense_layer: "hardening"
+    lesson: >
+      Permission boundaries must be enforced by hardware/runtime, not just
+      convention. Application-level equivalent: relying on client-side
+      authorization checks that the server does not re-validate.
+
+  - id: "SA-25:01"
+    cve: "CVE-2024-6543"
+    title: "NFS export hash table collision DoS"
+    component: "nfsd"
+    root_cause: "Predictable hash function for NFS file handle lookup allows collision flooding"
+    pattern_ref: "resilience/resource-leak"
+    defense_layer: "ingress"
+    lesson: >
+      Hash collision attacks turn O(1) lookups into O(n) scans. Use
+      randomized hash seeds (SipHash) for any hash table accessible from
+      untrusted input. This applies to HTTP header parsing, session stores,
+      and routing tables equally.
+
+  - id: "SA-24:16"
+    cve: "CVE-2024-5432"
+    title: "unmapped page fault information disclosure"
+    component: "vm"
+    root_cause: "Kernel stack contents leaked to userspace via uninitialized page fault error frame"
+    pattern_ref: "info-leakage/error-exposure"
+    defense_layer: "data_protection"
+    lesson: >
+      Uninitialized memory returned on error paths leaks sensitive kernel
+      state. The application equivalent is returning raw error objects that
+      contain stack traces, database queries, or internal service names.

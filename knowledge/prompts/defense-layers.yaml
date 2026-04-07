@@ -1,0 +1,155 @@
+# Defense-in-Depth Layer Assessment Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: defense-layers
+name: "Defense-in-Depth Layer Assessment"
+description: "Evaluate 6-layer defense posture inspired by FreeBSD security architecture"
+
+layer_refs:
+  - "ingress"
+  - "isolation"
+  - "hardening"
+  - "access_control"
+  - "data_protection"
+  - "tamper_detection"
+
+prompt: |
+  Evaluate the following project's defense-in-depth posture across 6 layers.
+  For each layer, assess: existence, effectiveness, and bypass potential.
+
+  Defense-in-depth means no single layer's failure leads to compromise. Each
+  layer must independently provide security value, and the combination must
+  be greater than the sum of parts.
+
+  ## The 6 Layers (inspired by FreeBSD security architecture)
+
+  ### Layer 1: Ingress (FreeBSD analog: pf firewall)
+
+  Perimeter defense that filters malicious traffic before it reaches application code.
+
+  Check for:
+  - TLS configured for all public endpoints (not just some)
+  - TLS version >= 1.2, strong cipher suites only
+  - WAF or rate limiting at edge (not just application level)
+  - HSTS headers with sufficient max-age (>= 31536000 seconds)
+  - CORS policy that restricts origins (not wildcard with credentials)
+  - Request size limits at ingress/proxy level
+  - Security headers: X-Content-Type-Options, X-Frame-Options, CSP
+
+  FreeBSD lesson: pf firewall rules are the first line of defense. Malformed
+  packets are dropped before they reach any application. Missing ingress
+  controls mean every application endpoint must independently defend itself.
+
+  ### Layer 2: Isolation (FreeBSD analog: jail + vnet)
+
+  Namespace separation that prevents lateral movement between services.
+
+  Check for:
+  - Services separated by Kubernetes namespace (not all in "default")
+  - NetworkPolicy restricting pod-to-pod communication
+  - Default-deny ingress and egress policies per namespace
+  - Service mesh with mTLS between services (Istio, Linkerd)
+  - Container images from trusted registries with digest pinning
+  - Resource quotas per namespace to prevent noisy neighbor DoS
+
+  FreeBSD lesson: jails with vnet provide complete network stack isolation.
+  A compromised jail cannot see or reach other jails' network interfaces.
+  Without Kubernetes network policies, any pod can reach any other pod.
+
+  ### Layer 3: Hardening (FreeBSD analog: capsicum)
+
+  Container and process hardening that limits what a compromised process can do.
+
+  Check for:
+  - Containers running as non-root (runAsNonRoot: true, runAsUser > 0)
+  - Read-only root filesystem (readOnlyRootFilesystem: true)
+  - All capabilities dropped (drop: ["ALL"]), minimal add-back
+  - No privileged containers or allowPrivilegeEscalation
+  - Seccomp profile applied (RuntimeDefault or stricter)
+  - AppArmor or SELinux profile active
+  - Dockerfile uses multi-stage build with minimal final image
+
+  FreeBSD lesson: Capsicum capability mode restricts a process to only
+  pre-authorized file descriptors and operations. After entering capability
+  mode, the process cannot open new files, create sockets, or access the
+  filesystem. Container hardening provides similar defense.
+
+  ### Layer 4: Access Control (FreeBSD analog: MAC framework)
+
+  Authentication and authorization ensuring every request is verified.
+
+  Check for:
+  - Route-level authentication middleware (not just frontend checks)
+  - Role-based access control for sensitive operations
+  - Ownership verification for resource access (IDOR prevention)
+  - CSRF protection for cookie-authenticated state-changing endpoints
+  - API key scoping with minimum required permissions
+  - Session management with secure cookie attributes
+  - JWT validation with proper algorithm restriction
+
+  FreeBSD lesson: The MAC (Mandatory Access Control) framework enforces
+  security policy beyond traditional Unix DAC. Even root cannot bypass MAC
+  rules. Application access control should similarly be non-bypassable.
+
+  ### Layer 5: Data Protection (FreeBSD analog: GELI encryption)
+
+  Encryption and masking ensuring data confidentiality throughout its lifecycle.
+
+  Check for:
+  - Database connections using SSL/TLS (sslmode=require or stronger)
+  - Sensitive data encrypted at rest (application-level or TDE)
+  - Secrets management via vault/KMS (not hardcoded or env files)
+  - PII masking in application logs (redact email, phone, tokens)
+  - Backup encryption with managed key rotation
+  - Encryption key management separate from encrypted data
+
+  FreeBSD lesson: GELI provides full-disk encryption at the block device
+  level. Even if physical media is stolen, data is unreadable without the
+  key. Application-level data protection provides equivalent guarantees
+  against database compromise and backup theft.
+
+  ### Layer 6: Tamper Detection (FreeBSD analog: immutable audit logs)
+
+  Audit trail integrity and change detection that reveals unauthorized modifications.
+
+  Check for:
+  - Security audit trail for auth events, permission changes, data access
+  - Audit log entries with integrity protection (hash chain or append-only)
+  - Audit log writes with error handling (no silent drops)
+  - Configuration fingerprinting with drift detection
+  - File integrity monitoring for critical binaries
+  - Alerting on audit pipeline failures
+
+  FreeBSD lesson: Immutable audit logs provide a tamper-evident record of
+  all system activity. If an attacker modifies logs to cover their tracks,
+  the broken hash chain reveals the tampering. Without tamper detection,
+  you cannot distinguish a clean system from a compromised one.
+
+  ## Assessment Format
+
+  For each layer, provide:
+
+  - **STATUS**: PASS | WARNING | FAIL | UNKNOWN
+    - PASS: Controls exist and are effective
+    - WARNING: Controls exist but have gaps or weaknesses
+    - FAIL: Controls are missing or fundamentally broken
+    - UNKNOWN: Insufficient evidence to assess (files not provided)
+  - **EVIDENCE**: What was found (or not found) in the provided code
+  - **GAP ANALYSIS**: What's missing and why it matters
+  - **FreeBSD LESSON**: How this relates to known OS-level vulnerabilities
+  - **PRIORITY**: Immediate | Short-term | Long-term (remediation urgency)
+
+  ## Summary
+
+  After assessing all 6 layers, provide:
+  1. **Overall Score**: Count of PASS / WARNING / FAIL / UNKNOWN
+  2. **Weakest Layer**: Which layer is the most critical gap
+  3. **Attack Path**: Describe the most likely attack path exploiting gaps
+  4. **Top 3 Recommendations**: Ordered by impact and implementation effort
+
+  ## Project Files to Analyze
+
+  {code_context}

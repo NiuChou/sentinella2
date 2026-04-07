@@ -1,0 +1,9 @@
+{
+  "_comment": "Add to Cursor MCP settings to enable sentinella2 tools",
+  "mcpServers": {
+    "sentinella2": {
+      "command": "sentinella2-mcp",
+      "args": []
+    }
+  }
+}

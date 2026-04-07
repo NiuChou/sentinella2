@@ -1,0 +1,23 @@
+name: Security Scan
+on: [push, pull_request]
+jobs:
+  sentinella2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sentinella2
+        run: |
+          curl -sSL https://github.com/perseworks/sentinella2/releases/latest/download/sentinella2-linux-amd64 -o sentinella2
+          chmod +x sentinella2
+          sudo mv sentinella2 /usr/local/bin/
+      - name: Run security scan
+        run: sentinella2 scan . --format json > scan-results.json
+      - name: Check for critical/high findings
+        run: |
+          CRITICAL=$(jq '.summary.critical' scan-results.json)
+          HIGH=$(jq '.summary.high' scan-results.json)
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "::error::Found $CRITICAL critical and $HIGH high security issues"
+            cat scan-results.json | jq '.findings[] | select(.severity == "CRITICAL" or .severity == "HIGH")'
+            exit 1
+          fi

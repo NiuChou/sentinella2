@@ -1,0 +1,113 @@
+# Trust Chain Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: trust-chain
+name: "Trust Chain Audit"
+description: "Audit for OIDC mismatch, DNS rebinding, and upstream integrity violations"
+
+pattern_refs:
+  - "trust-chain/oidc-origin-mismatch"
+  - "trust-chain/dns-rebinding"
+  - "trust-chain/upstream-unverified"
+
+prompt: |
+  Analyze the following code for trust chain vulnerabilities. Trust chain
+  vulnerabilities occur when the system trusts data from an external source
+  without properly verifying its origin, integrity, or authenticity. These
+  are often semantic vulnerabilities -- the code looks correct but the trust
+  assumptions are wrong.
+
+  ## Patterns to Check
+
+  ### 1. OIDC Origin Mismatch [CRITICAL]
+
+  Look for OIDC/OAuth2 configurations where the discovery endpoint and token
+  validation use different origins or issuers.
+
+  Red flags:
+  - Discovery URL and token issuer configured as separate values
+  - `oidc.NewProvider(discoveryURL)` paired with `oidc.Config{Issuer: differentURL}`
+  - JWKS endpoint URL hardcoded separately from issuer
+  - Token `iss` claim not validated against the discovery document issuer
+  - Multiple identity providers with shared audience values
+  - OpenID Connect discovery document fetched over HTTP (not HTTPS)
+
+  Attack scenario: Attacker controls a server that hosts a valid
+  `/.well-known/openid-configuration` document pointing to their own JWKS.
+  If the discovery URL and token validation issuer are separate config values,
+  an attacker who compromises the discovery URL config can supply their own
+  signing keys, allowing forged tokens to pass validation.
+
+  Real-world example: Two config fields: `OIDC_DISCOVERY_URL` and
+  `OIDC_TOKEN_ISSUER`. Discovery pointed to `https://auth.example.com` but
+  token validation accepted `issuer: "https://auth.example.com/"` (trailing
+  slash mismatch). Library fell back to skipping issuer validation entirely.
+
+  ### 2. DNS Rebinding [HIGH]
+
+  Look for external resource fetching where the resolved IP address is not
+  validated against internal/private ranges after DNS resolution.
+
+  Red flags:
+  - HTTP requests to user-provided URLs without IP validation after DNS lookup
+  - URL validation that checks hostname but not resolved IP
+  - Two separate DNS lookups (one for validation, one for connection) -- TOCTOU
+  - Webhook/callback URLs fetched without network-level SSRF protection
+  - Download URLs from external APIs used without IP validation
+  - Missing custom dialer/transport that pins DNS resolution
+
+  Attack scenario: Attacker controls DNS for `evil.com`. First resolution returns
+  `1.2.3.4` (public IP, passes validation). Before the HTTP client connects, DNS
+  TTL expires and second resolution returns `10.0.0.5` (internal service). The
+  request reaches the internal network.
+
+  Real-world example: File download service validated that the URL hostname was
+  not `localhost` or `169.254.x.x`, but used the default HTTP client which
+  resolved DNS again at connection time. DNS rebinding bypassed the hostname
+  check and reached the internal metadata service.
+
+  FreeBSD SA-26:01 reference: Trust chain violations in package verification
+  allowed compromised mirrors to serve malicious packages.
+
+  ### 3. Upstream Unverified [HIGH]
+
+  Look for external resources (binaries, scripts, packages, CDN assets) consumed
+  without integrity verification.
+
+  Red flags:
+  - `curl URL | sh` or `wget URL && bash` patterns in scripts/Dockerfiles
+  - `<script src="https://cdn...">` without `integrity` (SRI) attribute
+  - Container images using mutable tags (`:latest`) instead of digest pinning
+  - `ADD https://...` in Dockerfile without checksum verification
+  - `go install` without go.sum verification
+  - npm/pip packages installed without lockfile integrity
+  - Git submodules or dependencies fetched by branch name, not pinned commit
+
+  FreeBSD SA-26:01 analog: Upstream package integrity was not verified,
+  allowing a compromised mirror to serve modified packages that passed
+  the install process but contained backdoors.
+
+  Real-world example: Dockerfile contained
+  `RUN curl -fsSL https://releases.example.com/tool | sh`.
+  When the CDN was compromised, every container build installed a backdoored
+  binary. Fix: download to file, verify SHA256 checksum, then execute.
+
+  ## Trust Boundary Analysis
+
+  When analyzing trust chains, map the boundaries:
+  1. **External to Ingress**: CDN, DNS, third-party APIs, user browsers
+  2. **Ingress to Application**: Reverse proxy, load balancer, API gateway
+  3. **Application to Data**: Database, cache, message queue, object storage
+  4. **Application to Application**: Service-to-service calls, shared state
+
+  At each boundary, verify:
+  - Authentication: Is the source verified?
+  - Integrity: Is the data unmodified?
+  - Freshness: Is the data current (replay protection)?
+
+  ## Code to Analyze
+
+  {code_context}

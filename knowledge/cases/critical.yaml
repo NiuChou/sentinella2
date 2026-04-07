@@ -1,0 +1,129 @@
+# Critical Vulnerability Cases
+# Severity: CRITICAL (7 cases)
+# Source: perseworks full-platform security audit (93 vulnerabilities, 100% fixed)
+# Platform: altus-gateway (Go), altus-web (React/TS), Kubernetes deployment
+
+schema_version: "1.0"
+kind: CaseFile
+severity_filter: CRITICAL
+
+cases:
+  - id: "C1"
+    title: "WeChat pay callback signature verification skipped"
+    severity: CRITICAL
+    pattern_ref: "auth-flow/signature-skip"
+    freebsd_sa_ref: "SA-25:05"
+    location: "altus-gateway/internal/payment/wechat_provider.go:197"
+    description: >
+      Signature verification code exists but marked as TODO — never executed.
+      Payment callbacks accepted without cryptographic verification. An attacker
+      could forge payment success callbacks to credit accounts without actual payment.
+    fix_summary: >
+      Implement WECHATPAY2-SHA256-RSA2048 signature verification using official SDK.
+      Verify signature on every callback before processing payment state changes.
+    lesson: >
+      Code that appears to validate but actually doesn't is more dangerous than
+      no validation — it creates false sense of security during code review.
+
+  - id: "C2"
+    title: "OTP bypass with hardcoded '000000' in non-production"
+    severity: CRITICAL
+    pattern_ref: "auth-flow/dev-bypass"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/auth/otp_service.go:84"
+    description: >
+      APP_ENV != 'production' check allows OTP '000000' to bypass verification.
+      Staging and development environments share the same database as production.
+      If APP_ENV is unset or misconfigured, the bypass activates in production.
+    fix_summary: >
+      Remove development bypass entirely. Use dedicated test accounts with
+      proper OTP flow. Never gate security controls on runtime environment checks.
+    lesson: >
+      Development shortcuts that bypass security controls must never exist in
+      shared codebases — environment checks are not security boundaries.
+
+  - id: "C3"
+    title: "Production database password hardcoded in config.yaml"
+    severity: CRITICAL
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "deploy/config.yaml:18"
+    description: >
+      Production database credentials stored in plaintext in version-controlled
+      configuration file. Anyone with repository access has full database access.
+      Credentials persist in git history even after removal.
+    fix_summary: >
+      Migrate to Kubernetes Secrets with sealed-secrets encryption. Reference
+      via environment variables. Rotate compromised credentials immediately.
+    lesson: >
+      Secrets in version control are permanently compromised — even after
+      removal, they exist in git history and must be rotated.
+
+  - id: "C4"
+    title: "JWT secret key hardcoded in source code"
+    severity: CRITICAL
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/auth/jwt.go:12"
+    description: >
+      JWT signing key defined as string constant in source file. Anyone with
+      read access to the repository can forge valid JWT tokens for any user,
+      including admin accounts.
+    fix_summary: >
+      Load JWT secret from environment variable. Rotate compromised key
+      immediately. Invalidate all existing sessions upon rotation.
+    lesson: >
+      Hardcoded secrets in source code require immediate rotation upon
+      discovery — assume compromised from the moment the code was committed.
+
+  - id: "C5"
+    title: "Admin API endpoints without authentication middleware"
+    severity: CRITICAL
+    pattern_ref: "auth-flow/fail-open"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/router/admin.go:45"
+    description: >
+      Admin route group missing authentication middleware — all admin operations
+      accessible without login. User management, system configuration, and data
+      export endpoints exposed to unauthenticated requests.
+    fix_summary: >
+      Add auth middleware to admin route group. Implement role-based access
+      control requiring admin role for all admin endpoints.
+    lesson: >
+      Route group configuration errors can expose entire API surfaces — always
+      verify middleware chain in integration tests for every route group.
+
+  - id: "C6"
+    title: "Redis password in docker-compose.yml"
+    severity: CRITICAL
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "deploy/docker-compose.yml:34"
+    description: >
+      Redis authentication password stored in plaintext in docker-compose file
+      committed to version control. Redis stores session tokens and cached
+      auth data — compromised Redis password enables session hijacking.
+    fix_summary: >
+      Use Docker secrets or environment file not tracked in version control.
+      Add docker-compose override files to .gitignore.
+    lesson: >
+      Infrastructure-as-code files are code — they require the same secret
+      management discipline as application source code.
+
+  - id: "C7"
+    title: "Pending worker status gets full JWT with active permissions"
+    severity: CRITICAL
+    pattern_ref: "input-boundary/blacklist-check"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/auth/token_service.go:56"
+    description: >
+      Workers in 'pending' status receive JWT with same claims as active workers.
+      Status check uses blacklist (status != 'blocked') instead of whitelist
+      (status == 'active'). Any new status value added in the future will
+      automatically receive full permissions.
+    fix_summary: >
+      Change to whitelist: only status == 'active' gets full JWT. Pending and
+      suspended accounts receive restricted tokens with read-only permissions.
+    lesson: >
+      Blacklist checks (not blocked) are inherently weaker than whitelist checks
+      (is active) — new states default to allowed instead of denied.

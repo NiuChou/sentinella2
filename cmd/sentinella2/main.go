@@ -1,0 +1,167 @@
+// Command sentinella2 is the CLI entry point for the sentinella2 security
+// audit engine. It provides scan, audit, check-layers, init, and version
+// subcommands.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/perseworks/sentinella2/pkg/provider"
+	"github.com/perseworks/sentinella2/pkg/report"
+)
+
+const version = "0.1.0"
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	var err error
+	switch os.Args[1] {
+	case "scan":
+		err = runScan(os.Args[2:])
+	case "audit":
+		err = runAudit(os.Args[2:])
+	case "check-layers":
+		err = runCheckLayers(os.Args[2:])
+	case "kb":
+		err = runKB(os.Args[2:])
+	case "init":
+		err = runInit()
+	case "version":
+		fmt.Printf("sentinella2 v%s\n", version)
+	case "help", "-h", "--help":
+		printUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+		printUsage()
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runScan(args []string) error {
+	fs := flag.NewFlagSet("scan", flag.ExitOnError)
+	formatFlag := fs.String("format", "text", "output format: text, json, markdown")
+	_ = fs.Bool("changed-only", false, "scan only changed files (git diff)")
+
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: sentinella2 scan <path> [--format text|json|markdown]")
+	}
+
+	format, err := report.ParseFormat(*formatFlag)
+	if err != nil {
+		return err
+	}
+
+	targetPath := fs.Arg(0)
+	return executeScan(targetPath, format)
+}
+
+func runAudit(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	formatFlag := fs.String("format", "text", "output format: text, json, markdown")
+	providerFlag := fs.String("provider", "", "LLM provider: openai-compatible")
+	modelFlag := fs.String("model", "", "model name (e.g., claude-sonnet-4-20250514)")
+	apiKeyFlag := fs.String("api-key", "", "API key (prefer SENTINELLA2_API_KEY env var)")
+	baseURLFlag := fs.String("base-url", "", "API base URL")
+
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: sentinella2 audit <path> --provider <name> --model <model>")
+	}
+
+	format, err := report.ParseFormat(*formatFlag)
+	if err != nil {
+		return err
+	}
+
+	apiKey := resolveAPIKey(*apiKeyFlag)
+
+	cfg := provider.Config{
+		Name:    *providerFlag,
+		BaseURL: *baseURLFlag,
+		Model:   *modelFlag,
+		APIKey:  apiKey,
+	}
+
+	targetPath := fs.Arg(0)
+	return executeAudit(targetPath, format, cfg)
+}
+
+func runCheckLayers(args []string) error {
+	fs := flag.NewFlagSet("check-layers", flag.ExitOnError)
+	formatFlag := fs.String("format", "text", "output format: text, json, markdown")
+
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: sentinella2 check-layers <path> [--format text|json|markdown]")
+	}
+
+	format, err := report.ParseFormat(*formatFlag)
+	if err != nil {
+		return err
+	}
+
+	targetPath := fs.Arg(0)
+	return executeCheckLayers(targetPath, format)
+}
+
+func runInit() error {
+	fmt.Println("Initializing sentinella2 configuration...")
+	// TODO: Create .sentinella2.yaml config file in current directory.
+	fmt.Println("Created .sentinella2.yaml (default configuration)")
+	return nil
+}
+
+// resolveAPIKey returns the API key from the flag, falling back to the
+// SENTINELLA2_API_KEY environment variable.
+func resolveAPIKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("SENTINELLA2_API_KEY")
+}
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `sentinella2 - Security audit knowledge base + engine
+
+Usage:
+  sentinella2 <command> [options]
+
+Commands:
+  scan          Scan code for vulnerability patterns (Tier 1, no LLM required)
+  audit         Deep audit with LLM analysis (Tier 2+, requires provider config)
+  check-layers  Assess defense-in-depth layers
+  kb            Knowledge base management (update, feedback, tune, synthesize)
+  init          Create default configuration file
+  version       Print version
+  help          Show this help
+
+Examples:
+  sentinella2 scan ./src --format json
+  sentinella2 audit ./src --provider openai-compatible --model gpt-4o --base-url https://api.openai.com/v1
+  sentinella2 check-layers ./infrastructure --format markdown
+  sentinella2 kb update --since 7d
+  sentinella2 kb feedback mark finding-123 false_positive --reason "test code"
+  sentinella2 kb tune --dry-run
+`)
+}

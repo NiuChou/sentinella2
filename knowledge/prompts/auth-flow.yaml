@@ -1,0 +1,118 @@
+# Authentication & Authorization Audit Prompt
+# Model-agnostic: works with any LLM (Claude, GPT, GLM, Llama, Ollama).
+# Standard Markdown format, no model-specific features.
+
+schema_version: "1.0"
+kind: PromptTemplate
+id: auth-flow
+name: "Authentication & Authorization Audit"
+description: "Deep audit for auth vulnerabilities: IDOR, bypass, fail-open, signature skip"
+
+pattern_refs:
+  - "auth-flow/idor"
+  - "auth-flow/dev-bypass"
+  - "auth-flow/signature-skip"
+  - "auth-flow/csrf-missing"
+  - "auth-flow/permission-equivalent"
+  - "auth-flow/fail-open"
+
+prompt: |
+  Analyze the following code for authentication and authorization vulnerabilities.
+
+  ## Patterns to Check
+
+  ### 1. IDOR (Insecure Direct Object Reference) [HIGH]
+
+  Look for data access operations where the resource ID comes from user input but
+  ownership is not verified. Example: `findByID(params.id)` without checking if the
+  resource belongs to the requesting user.
+
+  Red flags:
+  - Database queries using an ID from request parameters without ownership check
+  - API endpoints that return data based solely on resource ID
+  - Missing userID/ownerID comparison in data access layer
+  - Sequential/predictable IDs that are easy to enumerate
+  - Returning "not found" vs "forbidden" differently (leaks existence info)
+
+  Real-world example: A payment API `GET /payments/:id` returned any user's payment
+  details because `repo.FindPaymentByID(paymentID)` never checked ownership. Fix:
+  use `repo.FindPaymentByIDAndUserID(paymentID, currentUserID)`.
+
+  ### 2. Development Bypass [CRITICAL]
+
+  Look for conditional logic that bypasses security in non-production environments.
+
+  Red flags:
+  - `if env != "production"` guarding security checks
+  - Hardcoded bypass codes (e.g., OTP "000000", password "admin")
+  - Feature flags that disable authentication
+  - `process.env.NODE_ENV !== 'production'` skipping token verification
+  - Debug endpoints without auth (e.g., `/debug/pprof`, `/__debug__`)
+
+  Real-world example: OTP verification was skipped when `APP_ENV != "production"`.
+  If the env var was unset in production (common misconfiguration), all OTP checks
+  were bypassed.
+
+  ### 3. Signature Verification Skip [CRITICAL]
+
+  Look for cryptographic verification that exists in code but is not actually executed.
+
+  Red flags:
+  - Verify functions that are defined but never called
+  - TODO/FIXME comments near verification code
+  - Verification results not checked (`_ = verify(...)` in Go, no await in JS)
+  - HMAC comparison using `==` instead of constant-time compare
+  - JWT verification with `algorithms: ["none"]` accepted
+
+  FreeBSD SA-25:05 analog: OpenSSH signature verification existed in the codebase
+  but was not called on a critical authentication path, allowing unauthorized access.
+
+  Real-world example: A WeChat payment callback handler had
+  `// TODO: verify signature` but processed payments without verification. Any
+  attacker could forge payment confirmations.
+
+  ### 4. CSRF Missing [HIGH]
+
+  Look for state-changing operations without CSRF protection.
+
+  Red flags:
+  - POST/PUT/DELETE routes without CSRF middleware
+  - Cookie-based auth without SameSite attribute
+  - Missing `X-CSRF-Token` header validation
+  - CORS configured with `credentials: true` but permissive origins
+  - Form submissions without embedded CSRF tokens
+
+  Note: API endpoints using Bearer token auth (not cookies) do not need CSRF
+  protection since tokens are not automatically attached by browsers.
+
+  ### 5. Permission Level Equivalence [HIGH]
+
+  Look for role checks that don't properly distinguish permission levels.
+
+  Red flags:
+  - `if (user.role)` or `if (isAuthenticated)` guarding admin actions
+  - `role != "guest"` instead of `role == "admin"` (blacklist vs whitelist)
+  - Single `isAdmin` boolean when granular permissions are needed
+  - Shared middleware between public and admin routes without role check
+  - `len(roles) > 0` instead of checking for specific required role
+
+  Real-world example: Admin user deletion endpoint only checked
+  `if user.Role != ""` -- any authenticated user could delete other users.
+
+  ### 6. Fail-Open [CRITICAL]
+
+  Look for security middleware that allows requests through when an error occurs.
+
+  Red flags:
+  - `if err != nil { next() }` in auth middleware
+  - `catch (err) { next() }` in Express middleware
+  - Connection errors (Redis, DB) causing auth bypass
+  - Missing error handling in security-critical paths
+  - Token parse failure falling through to success path
+
+  Real-world example: Auth middleware called `c.Next()` when Redis was
+  unreachable, meaning a Redis outage turned into a complete auth bypass.
+
+  ## Code to Analyze
+
+  {code_context}

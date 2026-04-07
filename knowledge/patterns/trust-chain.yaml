@@ -1,0 +1,177 @@
+# Pattern Category: Trust Chain
+# Covers OIDC origin mismatch, DNS rebinding, and upstream integrity.
+# Source: perseworks 93-vulnerability audit.
+
+schema_version: "1.0"
+kind: Pattern
+category: trust-chain
+
+patterns:
+  - id: "trust-chain/oidc-origin-mismatch"
+    name: "OIDC Origin Mismatch"
+    description: "OIDC discovery endpoint and token validation use different origins"
+    severity: CRITICAL
+    owasp: ["A07"]
+    cases: ["M-oidc"]
+
+    detection:
+      abstract: >
+        Detects configuration where the OIDC issuer URL used for discovery
+        (/.well-known/openid-configuration) differs from the issuer validated
+        in JWT tokens. An attacker who controls the discovery endpoint can
+        supply their own JWKS, allowing forged tokens to pass validation.
+        This is a semantic vulnerability requiring comparison of two config values.
+      tier: 3
+      rules:
+        go:
+          pattern: '(oidc\.NewProvider|oidcDiscoveryURL|issuerURL).*\n.*(?:oidc\.Config|tokenIssuer|ValidIssuer)'
+          negative_pattern: 'issuerURL\s*==\s*tokenConfig\.Issuer|validateIssuerMatch\('
+          context: "**/*.go"
+        typescript:
+          pattern: '(openid-client|jose|jsonwebtoken).*issuer.*\n.*(?:discovery|well-known)'
+          negative_pattern: 'issuer\s*===\s*discoveryIssuer|verifyIssuerMatch\('
+          context: "**/*.ts"
+      false_positive_hints:
+        - "Single issuer URL used for both discovery and validation is safe"
+        - "Explicit issuer comparison before token acceptance is mitigated"
+        - "Well-known providers (Auth0, Okta) with standard config are lower risk"
+
+    fix:
+      abstract: >
+        Ensure the issuer URL is a single source of truth used for both OIDC
+        discovery and JWT token validation. After fetching the discovery
+        document, compare its issuer field against the configured issuer.
+        Reject tokens where the iss claim does not exactly match.
+      templates:
+        go: |
+          // SAFE: single issuer URL for both discovery and validation
+          issuer := cfg.OIDCIssuer
+          provider, err := oidc.NewProvider(ctx, issuer)
+          if err != nil {
+              return fmt.Errorf("OIDC discovery failed: %w", err)
+          }
+          verifier := provider.Verifier(&oidc.Config{
+              ClientID: cfg.ClientID,
+              // Issuer is automatically validated against discovery issuer
+          })
+
+  - id: "trust-chain/dns-rebinding"
+    name: "DNS Rebinding"
+    description: "External resource fetched without host/IP validation, enabling SSRF via DNS rebinding"
+    severity: HIGH
+    owasp: ["A10"]
+    cases: ["M-download"]
+
+    detection:
+      abstract: >
+        Detects HTTP requests to external URLs where the resolved IP address
+        is not validated against internal/private ranges. An attacker controls
+        a DNS record that initially resolves to a public IP (passing validation)
+        then rebinds to an internal IP (bypassing firewalls). The second
+        resolution reaches internal services. Must check IP after DNS resolution,
+        not just the hostname.
+      tier: 2
+      rules:
+        go:
+          pattern: 'http\.(Get|Post|Do)\(.*(?:external|download|remote|callback|webhook)'
+          negative_pattern: 'net\.LookupIP.*IsPrivate\(\)|isInternalIP\(|validateResolvedIP\('
+          context: "**/*.go"
+        typescript:
+          pattern: '(fetch|axios)\(.*(?:external|download|remote|callback|webhook)'
+          negative_pattern: 'dns\.resolve.*isPrivateIP|validateIP\('
+          context: "**/*.ts"
+        python:
+          pattern: 'requests\.(get|post)\(.*(?:external|download|remote|callback|webhook)'
+          negative_pattern: 'ipaddress\.ip_address.*is_private|validate_resolved_ip\('
+          context: "**/*.py"
+      false_positive_hints:
+        - "Requests to hardcoded internal URLs are not DNS rebinding targets"
+        - "Services behind network policies that block egress may be lower risk"
+        - "Pinned DNS resolution (custom dialer) mitigates rebinding"
+
+    fix:
+      abstract: >
+        Implement a custom DNS resolver that pins the resolved IP and validates
+        it before making the HTTP request. Reject private IPs (10.x, 172.16-31.x,
+        192.168.x), loopback (127.x), link-local (169.254.x), and metadata
+        endpoints (169.254.169.254). Use a custom http.Transport with a
+        DialContext that performs the check.
+      templates:
+        go: |
+          // SAFE: custom dialer that validates resolved IP
+          transport := &http.Transport{
+              DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+                  host, port, _ := net.SplitHostPort(addr)
+                  ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+                  if err != nil {
+                      return nil, fmt.Errorf("DNS resolution failed: %w", err)
+                  }
+                  for _, ip := range ips {
+                      if ip.IP.IsPrivate() || ip.IP.IsLoopback() || ip.IP.IsLinkLocalUnicast() {
+                          return nil, fmt.Errorf("resolved IP %s is in blocked range", ip.IP)
+                      }
+                  }
+                  // Use first valid IP directly (pinned resolution)
+                  return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+              },
+          }
+          client := &http.Client{Transport: transport}
+
+  - id: "trust-chain/upstream-unverified"
+    name: "Upstream Unverified"
+    description: "Upstream/CDN response used without integrity verification"
+    severity: HIGH
+    owasp: ["A08"]
+    freebsd_sa: ["SA-26:01"]
+    cases: ["M-upstream"]
+
+    detection:
+      abstract: >
+        Detects downloading or including external resources (binaries, scripts,
+        packages) without verifying integrity via SHA256 checksums or
+        Subresource Integrity (SRI) hashes. A compromised CDN or
+        man-in-the-middle attacker can inject malicious content.
+      tier: 1
+      rules:
+        shell:
+          pattern: '(curl|wget)\s+.*\|\s*(sh|bash|sudo)|curl\s+-[^s]*o\s+\S+(?!.*sha256)'
+          negative_pattern: 'sha256sum\s+--check|gpg\s+--verify|cosign\s+verify'
+          context: "**/*.{sh,bash,Dockerfile,Makefile}"
+        html:
+          pattern: '<script\s+src="https?://.*"(?!.*integrity=)'
+          negative_pattern: 'integrity="sha(256|384|512)-'
+          context: "**/*.{html,htm,ejs,hbs}"
+        dockerfile:
+          pattern: '(ADD|COPY)\s+https?://|RUN\s+.*curl.*\|\s*(sh|bash)'
+          negative_pattern: 'RUN\s+.*sha256sum|COPY\s+--checksum='
+          context: "**/Dockerfile*"
+      false_positive_hints:
+        - "Internal registry URLs behind VPN may be lower risk"
+        - "Package manager installs (apt, apk) with signed repos are mitigated"
+        - "Go modules with go.sum verification are mitigated"
+
+    fix:
+      abstract: >
+        Always verify integrity of externally fetched resources. For binaries,
+        use SHA256 checksum verification. For CDN scripts, use Subresource
+        Integrity (SRI) attributes. For container images, use digest pinning
+        (image@sha256:...). For packages, use lock files with integrity hashes.
+      templates:
+        shell: |
+          # SAFE: download and verify checksum
+          curl -fsSL -o binary.tar.gz https://releases.example.com/v1.0/binary.tar.gz
+          echo "a1b2c3d4e5f6...expected_sha256_hash  binary.tar.gz" | sha256sum --check
+          tar xzf binary.tar.gz
+        html: |
+          <!-- SAFE: SRI hash on CDN script -->
+          <script
+            src="https://cdn.example.com/lib@3.0.0/lib.min.js"
+            integrity="sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8w"
+            crossorigin="anonymous">
+          </script>
+        dockerfile: |
+          # SAFE: verify checksum in Dockerfile
+          ARG BINARY_SHA256="a1b2c3d4e5f6..."
+          RUN curl -fsSL -o /tmp/binary.tar.gz https://releases.example.com/binary.tar.gz \
+              && echo "${BINARY_SHA256}  /tmp/binary.tar.gz" | sha256sum --check \
+              && tar xzf /tmp/binary.tar.gz -C /usr/local/bin/

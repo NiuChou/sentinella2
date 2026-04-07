@@ -1,0 +1,58 @@
+# Case Schema Definition
+# Defines the structure for real-world vulnerability case YAML files.
+# Each case represents a specific vulnerability instance found in an audit.
+
+schema_version: "1.0"
+kind: CaseSchema
+
+fields:
+  id:
+    type: string
+    required: true
+    description: "Unique case identifier"
+    example: "C1"
+
+  title:
+    type: string
+    required: true
+    description: "Short descriptive title of the vulnerability"
+    example: "WeChat Pay signature verification TODO in production"
+
+  severity:
+    type: enum
+    required: true
+    values: ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    description: "Impact severity of this specific case"
+
+  pattern_ref:
+    type: string
+    required: true
+    description: "Reference to the pattern ID this case exemplifies"
+    example: "auth-flow/signature-skip"
+
+  freebsd_sa_ref:
+    type: string
+    required: false
+    description: "FreeBSD Security Advisory reference if analogous"
+    example: "SA-25:05"
+
+  location:
+    type: string
+    required: true
+    description: "File path and line number where the vulnerability was found"
+    example: "altus-gateway/internal/payment/wechat_provider.go:197"
+
+  description:
+    type: string
+    required: true
+    description: "Detailed description of the vulnerability and its impact"
+
+  fix_summary:
+    type: string
+    required: true
+    description: "Summary of the remediation applied or recommended"
+
+  lesson:
+    type: string
+    required: true
+    description: "Key takeaway for preventing similar vulnerabilities"

@@ -1,0 +1,584 @@
+# Low Severity Vulnerability Cases
+# Source: perseworks 93-vulnerability audit
+# 26 cases (L1-L26) covering best practices and documentation/hygiene gaps.
+
+schema_version: "1.0"
+kind: CaseFile
+severity_filter: LOW
+
+cases:
+  # ──────────────────────────────────────────────────────────────────────
+  # L1-L13: Best Practices
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: "L1"
+    title: "pnpm install without --frozen-lockfile in CI"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: ".github/workflows/ci.yml:32"
+    description: >
+      The CI pipeline runs pnpm install without the --frozen-lockfile flag.
+      This allows the lockfile to be updated during CI, meaning a build can
+      silently pull in different dependency versions than those tested
+      locally. A compromised or malicious package update could be pulled
+      into the build without any developer reviewing the lockfile change.
+    fix_summary: >
+      Add --frozen-lockfile to all pnpm install commands in CI. This ensures
+      the build fails if the lockfile is out of sync with package.json,
+      forcing developers to explicitly commit lockfile changes.
+    lesson: >
+      CI builds must be deterministic. Without --frozen-lockfile (or
+      equivalent: npm ci, yarn --frozen-lockfile), the build environment
+      can silently diverge from what developers tested locally.
+
+  - id: "L2"
+    title: "CI workflow contains hardcoded test password"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: ".github/workflows/integration-test.yml:18"
+    description: >
+      The integration test workflow hardcodes a database password
+      (TEST_DB_PASSWORD=testpass123) directly in the YAML file. While this
+      is a test-only credential, it establishes a pattern of embedding
+      secrets in CI configuration that may be copied for production
+      workflows. The password is also visible in the repository history.
+    fix_summary: >
+      Use GitHub Actions secrets for all credentials, including test
+      passwords. Reference them as ${{ secrets.TEST_DB_PASSWORD }}. This
+      establishes a consistent pattern and prevents accidental credential
+      leakage.
+    lesson: >
+      Even test credentials should follow production secret management
+      patterns. Hardcoded test passwords create habits that lead to
+      hardcoded production passwords.
+
+  - id: "L3"
+    title: "console.log statements left in production frontend"
+    severity: LOW
+    pattern_ref: "info-leakage/console-leak"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/services/auth.ts:47"
+    description: >
+      Multiple console.log statements in the authentication and API client
+      modules output request parameters, response structures, and token
+      metadata to the browser console. Any user who opens DevTools can see
+      internal API structures, response formats, and partial token data.
+    fix_summary: >
+      Add an ESLint rule (no-console) that flags console.log in production
+      code. Use a structured logging library with environment-aware log
+      levels that suppresses debug output in production builds. Add a
+      build-time transform to strip console statements.
+    lesson: >
+      Console output in production is an information disclosure channel.
+      Use build-time stripping or environment-aware logging to ensure
+      debug output never reaches production users.
+
+  - id: "L4"
+    title: "Missing SRI hashes on CDN-loaded scripts"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "altus-web/public/index.html:12"
+    description: >
+      Third-party JavaScript files loaded from CDNs (analytics, error
+      tracking) do not include Subresource Integrity (SRI) hashes. If the
+      CDN is compromised, a modified script would be loaded and executed in
+      users' browsers without detection, enabling data exfiltration or
+      session hijacking.
+    fix_summary: >
+      Add integrity attributes with SHA-384 hashes to all CDN-loaded script
+      and link tags. Include a crossorigin="anonymous" attribute. Automate
+      SRI hash generation as part of the build pipeline when updating
+      third-party dependencies.
+    lesson: >
+      SRI is a low-effort defense that detects CDN compromise. Without it,
+      you are trusting the CDN operator and every network hop between the
+      CDN and your users to not modify your JavaScript.
+
+  - id: "L5"
+    title: "Permissive robots.txt exposes admin paths"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-web/public/robots.txt:1"
+    description: >
+      The robots.txt file uses Disallow directives to list admin paths
+      (/admin, /admin/settings, /admin/users, /internal/debug). While
+      intended to prevent indexing, this effectively publishes a directory
+      of sensitive paths for any attacker to discover without crawling.
+    fix_summary: >
+      Remove specific admin path listings from robots.txt. Use a simple
+      Disallow: /admin/ to hide the admin section without enumerating its
+      structure. Rely on authentication and network-level access controls
+      rather than obscurity for admin path protection.
+    lesson: >
+      robots.txt is a public file that search engines respect but attackers
+      read as a map. Never enumerate sensitive paths in robots.txt; use
+      broad Disallow rules if needed and rely on proper access controls.
+
+  - id: "L6"
+    title: "Missing X-Robots-Tag header on sensitive pages"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-web/server/middleware/security.go:42"
+    description: >
+      Admin and internal pages do not set the X-Robots-Tag: noindex header.
+      If an admin page URL is accidentally linked from a public page or
+      shared in a public forum, search engines may index the admin page
+      content and cache it, making internal information discoverable via
+      search queries.
+    fix_summary: >
+      Add middleware that sets X-Robots-Tag: noindex, nofollow for all
+      routes under /admin and /internal. Additionally, add a meta robots
+      noindex tag in the admin layout template as a defense-in-depth
+      measure.
+    lesson: >
+      X-Robots-Tag provides a server-side mechanism to prevent indexing
+      that does not depend on robots.txt being respected. Use it on all
+      pages that should never appear in search results.
+
+  - id: "L7"
+    title: "Source maps deployed to production"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-web/webpack.config.js:23"
+    description: >
+      Production builds include source maps (.map files) that are served
+      alongside bundled JavaScript. Source maps allow anyone to reconstruct
+      the original source code including variable names, comments, internal
+      module structure, and potentially embedded configuration values.
+    fix_summary: >
+      Disable source map generation in production builds or configure
+      webpack to use hidden-source-map (generates maps but does not
+      reference them in the bundle). Upload source maps to error tracking
+      services (Sentry) privately for debugging without public exposure.
+    lesson: >
+      Source maps reverse minification and reveal the full application
+      structure. In production, use hidden source maps uploaded to error
+      tracking services rather than publicly accessible .map files.
+
+  - id: "L8"
+    title: "Package.json contains unnecessary devDependencies in production build"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "altus-web/Dockerfile:12"
+    description: >
+      The production Docker build runs pnpm install without --prod, pulling
+      in all devDependencies (testing frameworks, linters, build tools) into
+      the production container. This increases the attack surface by
+      including packages that are never executed but may contain
+      vulnerabilities.
+    fix_summary: >
+      Use multi-stage Docker builds: install all dependencies in the build
+      stage, then copy only production artifacts to the final stage. In the
+      final stage, run pnpm install --prod to include only runtime
+      dependencies.
+    lesson: >
+      Every package in a production container is attack surface. Multi-stage
+      Docker builds separate build-time tooling from runtime dependencies,
+      reducing the number of packages an attacker can leverage.
+
+  - id: "L9"
+    title: "Missing rate limit headers in API responses"
+    severity: LOW
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/middleware/ratelimit.go:67"
+    description: >
+      While rate limiting is applied, the API does not return standard rate
+      limit headers (X-RateLimit-Limit, X-RateLimit-Remaining,
+      X-RateLimit-Reset). Clients cannot programmatically adapt their
+      request rate, leading to unnecessary 429 errors and retry storms that
+      waste resources on both sides.
+    fix_summary: >
+      Include X-RateLimit-Limit, X-RateLimit-Remaining, and
+      X-RateLimit-Reset headers in all API responses. Follow the IETF
+      RateLimit header draft specification. Document the rate limits in the
+      API reference.
+    lesson: >
+      Rate limiting without informational headers is a blunt instrument.
+      Transparent rate limits allow well-behaved clients to self-throttle,
+      reducing unnecessary retries and improving overall system efficiency.
+
+  - id: "L10"
+    title: "No security.txt file for responsible disclosure"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-web/public/.well-known/"
+    description: >
+      The application does not publish a .well-known/security.txt file as
+      defined by RFC 9116. Security researchers who discover vulnerabilities
+      have no standard way to report them, which may lead to public
+      disclosure without prior notification or the vulnerability going
+      unreported entirely.
+    fix_summary: >
+      Create a .well-known/security.txt file containing Contact, Expires,
+      Encryption, and Preferred-Languages fields. Point the contact to a
+      monitored security email address. Sign the file with PGP if an
+      encryption key is provided.
+    lesson: >
+      security.txt is a low-effort standard that directs security
+      researchers to the correct reporting channel. Without it, good-faith
+      reporters may give up or resort to public disclosure.
+
+  - id: "L11"
+    title: "API versioning not enforced"
+    severity: LOW
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/router/router.go:18"
+    description: >
+      API routes are registered without version prefixes. All clients share
+      a single endpoint namespace, meaning any breaking change affects all
+      consumers simultaneously. There is no mechanism to deprecate endpoints
+      gracefully or maintain backward compatibility during migrations.
+    fix_summary: >
+      Prefix all API routes with a version (e.g., /api/v1/). Implement
+      version negotiation via Accept header or URL path. Maintain previous
+      versions for a documented deprecation period. Add Sunset headers to
+      deprecated endpoints.
+    lesson: >
+      Unversioned APIs create fragile coupling between server and all
+      clients. Versioning provides a mechanism for safe evolution and
+      deprecation without breaking existing integrations.
+
+  - id: "L12"
+    title: "Missing Referrer-Policy header"
+    severity: LOW
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: ""
+    location: "altus-web/server/middleware/security.go:24"
+    description: >
+      The application does not set a Referrer-Policy header. When users
+      navigate from the application to external links, the full URL
+      (potentially containing session tokens, search queries, or internal
+      path structures) is sent in the Referer header to the destination
+      server.
+    fix_summary: >
+      Set Referrer-Policy: strict-origin-when-cross-origin as a default.
+      For pages that contain sensitive data in URLs, use
+      Referrer-Policy: no-referrer. Add the header in the security
+      middleware applied to all routes.
+    lesson: >
+      The Referer header leaks URL information to third parties by default.
+      A Referrer-Policy header is a one-line fix that prevents URL-based
+      information leakage across origin boundaries.
+
+  - id: "L13"
+    title: "Cookie without HttpOnly flag on non-auth cookie"
+    severity: LOW
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/utils/preferences.ts:22"
+    description: >
+      The user preferences cookie (theme, language, timezone) is set without
+      the HttpOnly flag. While this cookie does not contain authentication
+      data, it is accessible to JavaScript. An XSS vulnerability could read
+      and exfiltrate these preferences, which may contain personally
+      identifiable information (timezone, language preference) useful for
+      user profiling.
+    fix_summary: >
+      Set HttpOnly on all cookies that do not require JavaScript access. If
+      the frontend needs to read preferences, use a dedicated API endpoint
+      rather than cookie-based storage. Audit all cookies for appropriate
+      flag settings.
+    lesson: >
+      HttpOnly should be the default for all cookies. Only omit it when
+      JavaScript access is explicitly required and the cookie contains no
+      information useful to an attacker.
+
+  # ──────────────────────────────────────────────────────────────────────
+  # L14-L26: Documentation / Hygiene
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: "L14"
+    title: "math/rand used instead of crypto/rand for non-security random"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-server/internal/util/random.go:8"
+    description: >
+      The utility package uses math/rand for generating random values in
+      non-security contexts (e.g., jitter delays, sampling rates). While
+      not a direct vulnerability, the predictable output of math/rand
+      creates a risk that a developer copies this pattern for security-
+      sensitive random generation (token creation, nonce generation) where
+      predictability enables attacks.
+    fix_summary: >
+      Document the distinction clearly with a code comment explaining why
+      math/rand is acceptable here. Consider using crypto/rand universally
+      to eliminate the risk of accidental misuse. In Go 1.22+, math/rand/v2
+      is automatically seeded and less predictable.
+    lesson: >
+      Predictable random number generators near security-sensitive code
+      create a copy-paste risk. When in doubt, use crypto/rand and accept
+      the marginal performance cost for the safety guarantee.
+
+  - id: "L15"
+    title: "SRI intentional omission not documented"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "altus-web/public/index.html:8"
+    description: >
+      Several script tags intentionally omit SRI hashes because the CDN
+      serves dynamically versioned resources. However, this intentional
+      decision is not documented. Future developers may add SRI hashes that
+      break on CDN updates, or may not add SRI to scripts that should have
+      it, because the policy is unclear.
+    fix_summary: >
+      Add a comment block in index.html documenting the SRI policy: which
+      scripts have SRI and why, which scripts intentionally omit SRI and
+      why, and the process for updating SRI hashes when dependencies change.
+      Create an ADR (Architecture Decision Record) for the SRI policy.
+    lesson: >
+      Security decisions that deviate from best practice must be documented.
+      Undocumented omissions become indistinguishable from oversights,
+      leading to inconsistent security posture over time.
+
+  - id: "L16"
+    title: "Admin OTP rate limit documented only in code comments"
+    severity: LOW
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/handler/otp.go:33"
+    description: >
+      The admin OTP verification endpoint has a rate limit of 5 attempts per
+      minute, but this is documented only in a code comment above the handler.
+      The rate limit value is not in the configuration system, the API
+      documentation, or the security runbook. Changes require code deployment
+      rather than configuration updates.
+    fix_summary: >
+      Move the rate limit value to the configuration system. Document it in
+      the API reference and the security runbook. Add a metric that tracks
+      rate limit hits for monitoring dashboards.
+    lesson: >
+      Security parameters buried in code comments are invisible to operators
+      and auditors. Externalize them to configuration and document them in
+      operational runbooks where they can be reviewed and adjusted without
+      code changes.
+
+  - id: "L17"
+    title: "Missing SBOM (Software Bill of Materials)"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "altus-server/Dockerfile:1"
+    description: >
+      The project does not generate a Software Bill of Materials (SBOM) for
+      its production artifacts. Without an SBOM, there is no machine-readable
+      inventory of dependencies, making it difficult to assess exposure to
+      newly disclosed vulnerabilities (e.g., a new CVE in a transitive
+      dependency) in a timely manner.
+    fix_summary: >
+      Generate an SBOM in CycloneDX or SPDX format as part of the CI
+      pipeline. Use syft or cyclonedx-gomod for Go projects. Attach the
+      SBOM to container images and release artifacts. Set up a process to
+      cross-reference the SBOM against new CVE disclosures.
+    lesson: >
+      You cannot secure what you cannot inventory. An SBOM provides the
+      foundation for vulnerability management by answering "are we affected?"
+      within minutes of a new CVE disclosure.
+
+  - id: "L18"
+    title: "No dependency vulnerability scanning in CI"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: ".github/workflows/ci.yml:1"
+    description: >
+      The CI pipeline does not include dependency vulnerability scanning.
+      Known vulnerable dependencies can be merged and deployed without any
+      automated check. The team relies on manual periodic review, which
+      allows vulnerable dependencies to persist for weeks or months.
+    fix_summary: >
+      Add govulncheck (Go) and pnpm audit (JavaScript) steps to the CI
+      pipeline. Configure them to fail the build on HIGH and CRITICAL
+      vulnerabilities. Use Dependabot or Renovate for automated dependency
+      update pull requests.
+    lesson: >
+      Automated dependency scanning in CI catches known vulnerabilities at
+      the earliest possible point. Combined with automated update PRs, it
+      reduces the window between vulnerability disclosure and remediation.
+
+  - id: "L19"
+    title: "Git hooks not enforcing commit signing"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: ".githooks/pre-commit:1"
+    description: >
+      The repository does not enforce GPG or SSH commit signing. Any
+      developer (or attacker with repository write access) can create
+      commits attributed to any author. This undermines audit trails and
+      makes it impossible to verify that a commit was actually created by
+      the attributed developer.
+    fix_summary: >
+      Enable commit signing with SSH keys (simpler) or GPG keys. Add a
+      pre-commit hook that verifies the commit is signed. Enable GitHub's
+      vigilant mode to mark unsigned commits. Document the signing setup
+      in the contributing guide.
+    lesson: >
+      Unsigned commits are unverified claims of authorship. Commit signing
+      provides non-repudiation for code changes, which is essential for
+      audit trails and incident investigation.
+
+  - id: "L20"
+    title: "Missing branch protection rules"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: ".github/settings.yml:1"
+    description: >
+      The main branch has no protection rules configured. Developers can
+      push directly to main, force-push to rewrite history, and merge
+      pull requests without review. This allows unreviewed code (including
+      potential backdoors or accidental vulnerabilities) to reach production.
+    fix_summary: >
+      Enable branch protection on main: require pull request reviews (at
+      least 1 approver), require status checks to pass, prevent force pushes,
+      and require linear history. Configure these in GitHub repository
+      settings or via a settings.yml file.
+    lesson: >
+      Branch protection rules enforce the four-eyes principle for code
+      changes. Without them, a single compromised or negligent developer
+      account can push arbitrary code to production.
+
+  - id: "L21"
+    title: "No automated secret scanning in repository"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: ".github/workflows/ci.yml:1"
+    description: >
+      The repository does not use automated secret scanning (GitHub secret
+      scanning, truffleHog, or gitleaks). Accidentally committed secrets
+      (API keys, database passwords, private keys) remain in the repository
+      history undetected until they are discovered manually or exploited.
+    fix_summary: >
+      Enable GitHub secret scanning for the repository. Add gitleaks as a
+      pre-commit hook and CI step. Create a .gitleaks.toml configuration
+      with rules tailored to the project's secret formats. Document the
+      incident response process for accidentally committed secrets.
+    lesson: >
+      Secrets accidentally committed to git persist in history even after
+      deletion. Automated scanning at commit time and in CI catches
+      accidental commits before they reach the remote repository.
+
+  - id: "L22"
+    title: "Docker health check not configured"
+    severity: LOW
+    pattern_ref: "resilience/resource-leak"
+    freebsd_sa_ref: ""
+    location: "altus-server/Dockerfile:24"
+    description: >
+      The Dockerfile does not define a HEALTHCHECK instruction. Container
+      orchestrators (Docker Compose, ECS) cannot determine if the
+      application inside the container is healthy or hung. A container with
+      a crashed or deadlocked application continues to receive traffic,
+      causing user-facing errors.
+    fix_summary: >
+      Add a HEALTHCHECK instruction that queries the application's health
+      endpoint (e.g., /healthz). Set appropriate interval, timeout, and
+      retries parameters. Ensure the health endpoint checks critical
+      dependencies (database connectivity, cache availability).
+    lesson: >
+      Container health checks enable orchestrators to automatically replace
+      unhealthy instances. Without them, "running but broken" containers
+      serve errors until a human intervenes.
+
+  - id: "L23"
+    title: "Missing resource limits in K8s pod spec"
+    severity: LOW
+    pattern_ref: "isolation/excessive-perms"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/base/deployment.yaml:62"
+    description: >
+      Pod specifications do not define CPU or memory resource requests and
+      limits. Without limits, a single misbehaving pod (memory leak,
+      CPU-intensive loop) can consume all node resources, starving other
+      pods and causing cascading failures across the cluster.
+    fix_summary: >
+      Define resource requests and limits for all containers. Set requests
+      based on observed steady-state usage and limits based on acceptable
+      burst capacity. Use a LimitRange in the namespace as a safety net
+      for pods that omit resource specifications.
+    lesson: >
+      Resource limits are the container equivalent of process ulimits. They
+      prevent a single workload from becoming a noisy neighbor that degrades
+      the entire node.
+
+  - id: "L24"
+    title: "Analytics event data not validated against schema"
+    severity: LOW
+    pattern_ref: "input-boundary/missing-range-check"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/services/analytics.ts:56"
+    description: >
+      Analytics events are dispatched to the tracking endpoint without
+      client-side schema validation. Arbitrary event properties are accepted
+      and forwarded to the analytics pipeline. This allows polluted data
+      (incorrect types, oversized payloads, PII in unexpected fields) to
+      enter the analytics system, degrading data quality and potentially
+      creating compliance issues.
+    fix_summary: >
+      Define a TypeScript interface for each analytics event type. Validate
+      event payloads against the schema before dispatch. Add server-side
+      validation as a defense-in-depth measure. Strip or redact fields that
+      could contain PII.
+    lesson: >
+      Unvalidated analytics events are an uncontrolled data ingestion path.
+      Schema validation prevents data quality issues and ensures PII does
+      not flow into analytics systems where retention and access controls
+      may differ from the primary application.
+
+  - id: "L25"
+    title: "Deprecated TLS 1.0/1.1 not explicitly disabled"
+    severity: LOW
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-server/internal/server/tls.go:18"
+    description: >
+      The TLS configuration does not explicitly set a minimum version,
+      relying on the Go standard library default (TLS 1.2). While the
+      current default is secure, it is not explicit, and future library
+      changes or configuration overrides could inadvertently enable TLS 1.0
+      or 1.1, which have known weaknesses (BEAST, POODLE, SWEET32).
+    fix_summary: >
+      Explicitly set tls.Config.MinVersion to tls.VersionTLS12. For
+      services that do not need to support legacy clients, set MinVersion
+      to tls.VersionTLS13. Document the TLS policy and the supported
+      cipher suites.
+    lesson: >
+      Security configurations should be explicit, not implicit. Relying on
+      library defaults means your security posture changes silently when
+      dependencies are updated. Pin security-critical settings explicitly.
+
+  - id: "L26"
+    title: "Missing DNS CAA record for certificate authority restriction"
+    severity: LOW
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: "infra/dns/zones/altus.io.zone:1"
+    description: >
+      The domain's DNS zone does not include a CAA (Certification Authority
+      Authorization) record. Without CAA, any certificate authority can
+      issue certificates for the domain. A compromised or rogue CA could
+      issue a valid certificate that enables MITM attacks, and there would
+      be no DNS-level control to prevent it.
+    fix_summary: >
+      Add a CAA record restricting certificate issuance to the CAs
+      currently used (e.g., "0 issue letsencrypt.org"). Add a CNAME or
+      email for the iodef tag to receive notifications of unauthorized
+      issuance attempts. Review CA authorization annually.
+    lesson: >
+      CAA records are a free DNS-level control that restricts which CAs
+      can issue certificates for your domain. They reduce the risk of
+      unauthorized certificate issuance from the hundreds of trusted CAs
+      to only the ones you explicitly authorize.

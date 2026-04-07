@@ -1,0 +1,741 @@
+# Medium Severity Vulnerability Cases
+# Source: perseworks 93-vulnerability audit
+# 34 cases (M1-M34) covering infrastructure, application security, and code hygiene.
+
+schema_version: "1.0"
+kind: CaseFile
+severity_filter: MEDIUM
+
+cases:
+  # ──────────────────────────────────────────────────────────────────────
+  # M1-M10: Infrastructure / Deployment
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: "M1"
+    title: "sslmode=disable in PostgreSQL connection string"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-server/internal/config/database.go:42"
+    description: >
+      The PostgreSQL connection string uses sslmode=disable, transmitting all
+      queries and results as plaintext over the network. An attacker with
+      network access between the application and database can intercept
+      credentials, PII, and business data via passive packet capture.
+    fix_summary: >
+      Set sslmode=verify-full and configure the server CA certificate via
+      PGSSLROOTCERT. Ensure the database server presents a valid certificate
+      signed by the expected CA.
+    lesson: >
+      Database connections carry the same sensitivity as the data they transport.
+      Always enforce TLS verification for database connections, even within
+      private networks, to defend against lateral movement after a perimeter breach.
+
+  - id: "M2"
+    title: "FFmpeg command injection via unsanitized filename"
+    severity: MEDIUM
+    pattern_ref: "injection/command-injection"
+    freebsd_sa_ref: ""
+    location: "altus-media/internal/transcode/ffmpeg.go:88"
+    description: >
+      User-uploaded filenames are interpolated directly into the FFmpeg shell
+      command string without sanitization. A filename containing shell
+      metacharacters (e.g., "; rm -rf /") allows arbitrary command execution
+      on the transcoding worker.
+    fix_summary: >
+      Use exec.Command with argument arrays instead of shell interpolation.
+      Additionally, sanitize filenames to alphanumeric plus a limited set of
+      safe characters, and rename uploads to UUIDs on ingestion.
+    lesson: >
+      Never interpolate user-controlled data into shell commands. Use
+      exec.Command (Go), subprocess with argument lists (Python), or
+      child_process.execFile (Node) to avoid shell injection entirely.
+
+  - id: "M3"
+    title: "SMS provider URL constructed from user input (SSRF risk)"
+    severity: MEDIUM
+    pattern_ref: "injection/url-injection"
+    freebsd_sa_ref: ""
+    location: "altus-notify/internal/sms/provider.go:63"
+    description: >
+      The SMS sending function constructs the provider callback URL by
+      concatenating a user-supplied phone number into the URL path. A crafted
+      phone number value such as "@169.254.169.254/latest/meta-data/" can
+      redirect the HTTP request to internal cloud metadata endpoints, leaking
+      IAM credentials and instance identity.
+    fix_summary: >
+      Validate phone numbers against E.164 format before use. Construct URLs
+      using url.Parse and set path components individually. Add an allowlist
+      of permitted destination hosts for outbound HTTP requests.
+    lesson: >
+      Any user input incorporated into a URL is an SSRF vector. Validate
+      inputs against strict format rules and enforce an outbound request
+      allowlist to prevent internal network reconnaissance.
+
+  - id: "M4"
+    title: "Notification content rendered without HTML sanitization"
+    severity: MEDIUM
+    pattern_ref: "injection/content-injection"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/components/NotificationBanner.tsx:34"
+    description: >
+      Notification messages from the backend are rendered using
+      dangerouslySetInnerHTML without sanitization. If an attacker controls
+      notification content (e.g., through a compromised admin account or
+      injection into the notification pipeline), they can execute arbitrary
+      JavaScript in every connected user's browser.
+    fix_summary: >
+      Replace dangerouslySetInnerHTML with a sanitization library such as
+      DOMPurify. Parse only a limited set of safe HTML tags (bold, italic,
+      links) and strip everything else.
+    lesson: >
+      Treat all server-rendered content as untrusted at the display layer.
+      Sanitize HTML on the client side even when the backend is trusted,
+      because defense in depth accounts for upstream compromises.
+
+  - id: "M5"
+    title: "OIDC discovery endpoint uses different origin than token validation"
+    severity: MEDIUM
+    pattern_ref: "trust-chain/oidc-origin-mismatch"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/oidc/discovery.go:27"
+    description: >
+      The OIDC discovery document is fetched from a different origin than the
+      one used for token issuer validation. An attacker who controls the
+      discovery endpoint (via DNS hijacking or misconfigured CDN) can supply
+      their own JWKS, causing the application to accept forged ID tokens.
+    fix_summary: >
+      Ensure the discovery endpoint origin exactly matches the expected issuer.
+      Pin the JWKS URI from the discovery document and validate that it shares
+      the same origin. Cache the JWKS with a bounded TTL and re-validate on
+      rotation.
+    lesson: >
+      OIDC security depends on the entire trust chain from discovery to token
+      validation sharing a single verified origin. Any origin mismatch creates
+      a token forgery vector.
+
+  - id: "M6"
+    title: "Binary downloads in CI without SHA256 verification"
+    severity: MEDIUM
+    pattern_ref: "trust-chain/upstream-unverified"
+    freebsd_sa_ref: ""
+    location: ".github/workflows/build.yml:47"
+    description: >
+      CI pipeline downloads third-party binaries (kubectl, helm, terraform)
+      using curl without verifying SHA256 checksums. A compromised CDN or
+      MITM attack on the download could inject a trojanized binary that
+      executes with full CI privileges, including access to deployment
+      credentials and artifact registries.
+    fix_summary: >
+      Pin each binary download to a specific version and verify its SHA256
+      checksum after download. Use official package managers or GitHub
+      releases with signature verification where available.
+    lesson: >
+      Every binary executed in CI is part of the supply chain. Unverified
+      downloads are equivalent to running untrusted code with deployment
+      credentials.
+
+  - id: "M7"
+    title: "Writable root filesystem in application containers"
+    severity: MEDIUM
+    pattern_ref: "isolation/writable-rootfs"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/base/deployment.yaml:58"
+    description: >
+      Application containers run with a writable root filesystem. If an
+      attacker achieves code execution within the container, they can modify
+      application binaries, install tools for lateral movement, or tamper
+      with configuration files to escalate privileges.
+    fix_summary: >
+      Set readOnlyRootFilesystem: true in the container security context.
+      Mount specific writable volumes (emptyDir) only for directories that
+      require write access such as /tmp or application-specific cache paths.
+    lesson: >
+      A read-only root filesystem limits post-exploitation impact by
+      preventing binary modification and tool installation within a
+      compromised container.
+
+  - id: "M8"
+    title: "Missing seccomp profile in pod security context"
+    severity: MEDIUM
+    pattern_ref: "isolation/excessive-perms"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/base/deployment.yaml:55"
+    description: >
+      Pod specifications do not define a seccomp profile, leaving containers
+      with access to the full set of Linux syscalls. This expands the kernel
+      attack surface available to an attacker who achieves code execution
+      within the container.
+    fix_summary: >
+      Set seccompProfile.type to RuntimeDefault in the pod security context.
+      For hardened workloads, create a custom seccomp profile that allowlists
+      only the syscalls the application requires.
+    lesson: >
+      Seccomp profiles are a low-cost defense layer that reduces kernel
+      attack surface. RuntimeDefault blocks dozens of dangerous syscalls
+      with no application changes required.
+
+  - id: "M9"
+    title: "Audit log entries silently dropped on Redis write failure"
+    severity: MEDIUM
+    pattern_ref: "resilience/audit-drop"
+    freebsd_sa_ref: ""
+    location: "altus-audit/internal/sink/redis.go:112"
+    description: >
+      When the Redis audit sink returns an error, the audit log entry is
+      discarded with only a debug-level log message. An attacker who can
+      trigger Redis unavailability (e.g., resource exhaustion) can perform
+      actions that leave no audit trail, defeating forensic investigation.
+    fix_summary: >
+      Implement a fallback write path (local file or dead-letter queue) for
+      audit entries that fail to persist. Raise an alert when the primary
+      audit sink is unavailable. Never discard audit records silently.
+    lesson: >
+      Audit logs are a security control, not a convenience feature. Dropped
+      audit entries create blind spots that attackers deliberately exploit.
+      Always provide a fallback persistence path.
+
+  - id: "M10"
+    title: "Goroutine leak in background job processor"
+    severity: MEDIUM
+    pattern_ref: "resilience/resource-leak"
+    freebsd_sa_ref: ""
+    location: "altus-worker/internal/processor/dispatch.go:78"
+    description: >
+      The background job dispatcher spawns a goroutine per job but does not
+      enforce a concurrency limit or cancellation timeout. Under sustained
+      load or when downstream services are slow, goroutines accumulate
+      unboundedly, eventually exhausting memory and causing an OOM kill.
+    fix_summary: >
+      Use a semaphore (buffered channel or golang.org/x/sync/semaphore) to
+      cap concurrent goroutines. Add context.WithTimeout to each job
+      goroutine. Monitor goroutine count as a health metric.
+    lesson: >
+      Unbounded concurrency is a latent availability risk. Always limit
+      goroutine, thread, or connection pool sizes, and enforce timeouts on
+      all blocking operations.
+
+  # ──────────────────────────────────────────────────────────────────────
+  # M11-M20: Application Security
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: "M11"
+    title: "User email exposed in API response without need"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/handler/user.go:134"
+    description: >
+      The GET /api/users/:id endpoint returns the user's email address in
+      every response, including responses to other authenticated users who
+      have no legitimate need for that data. This enables email harvesting
+      for phishing campaigns by any authenticated user.
+    fix_summary: >
+      Return email only when the requesting user is viewing their own profile
+      or has admin privileges. Implement field-level access control using a
+      response serializer that strips sensitive fields based on the caller's
+      role.
+    lesson: >
+      Apply the principle of least privilege to API responses. Every field
+      returned to the client is a potential information leak. Use role-based
+      field filtering at the serialization layer.
+
+  - id: "M12"
+    title: "Admin settings endpoint returns full configuration including internal URLs"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/handler/admin.go:67"
+    description: >
+      The admin settings endpoint returns the entire application configuration
+      object, including internal service URLs, database hostnames, Redis
+      connection strings, and third-party API base URLs. An attacker with
+      admin access (or via an IDOR on this endpoint) gains a complete map
+      of internal infrastructure.
+    fix_summary: >
+      Return only the specific settings that the admin UI needs to display.
+      Create a dedicated AdminSettingsResponse DTO that explicitly includes
+      only safe, user-facing configuration values.
+    lesson: >
+      Never serialize entire configuration objects into API responses.
+      Explicitly define response DTOs that include only the fields the
+      client needs, treating all internal infrastructure details as secret.
+
+  - id: "M13"
+    title: "Missing Content-Security-Policy header"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/error-exposure"
+    freebsd_sa_ref: ""
+    location: "altus-web/server/middleware/security.go:18"
+    description: >
+      The application does not set a Content-Security-Policy header, leaving
+      the browser without instructions on which sources are permitted for
+      scripts, styles, images, and connections. This makes XSS exploitation
+      easier because injected scripts can load resources from any origin.
+    fix_summary: >
+      Implement a strict CSP that defaults to 'self' and explicitly
+      allowlists required external origins. Use nonce-based script loading
+      instead of 'unsafe-inline'. Deploy in report-only mode first to
+      identify violations before enforcing.
+    lesson: >
+      Content-Security-Policy is the most effective browser-side defense
+      against XSS. Deploy it early in development to avoid painful
+      retrofitting of inline scripts and styles.
+
+  - id: "M14"
+    title: "CORS allows wildcard origin in staging"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/csrf-missing"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/middleware/cors.go:23"
+    description: >
+      The CORS middleware in the staging environment allows Access-Control-Allow-Origin: *
+      with credentials. Since staging shares the same database as a pre-production
+      environment, an attacker hosting a malicious page can make authenticated
+      cross-origin requests and exfiltrate data from the staging API.
+    fix_summary: >
+      Replace wildcard origin with an explicit allowlist of permitted origins
+      for all environments. Never combine wildcard origin with
+      Access-Control-Allow-Credentials: true. Use environment-specific CORS
+      configuration loaded from config, not hardcoded.
+    lesson: >
+      Staging environments with shared data deserve production-grade security
+      controls. CORS misconfigurations in staging become production
+      vulnerabilities when environments share data or credentials.
+
+  - id: "M15"
+    title: "Session cookie without SameSite attribute"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/csrf-missing"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/session/cookie.go:45"
+    description: >
+      The session cookie is set without a SameSite attribute, causing browsers
+      to default to SameSite=Lax. While Lax provides some CSRF protection for
+      top-level navigations, it does not protect against CSRF on same-site
+      subdomains or via certain redirect-based attack patterns.
+    fix_summary: >
+      Explicitly set SameSite=Strict for the session cookie. If cross-site
+      POST flows are required (e.g., OAuth callbacks), use SameSite=Lax with
+      an additional CSRF token for state-changing operations.
+    lesson: >
+      Always explicitly set cookie attributes rather than relying on browser
+      defaults. Browser default behaviors change across versions and do not
+      constitute a security guarantee.
+
+  - id: "M16"
+    title: "Webhook retry logic without exponential backoff"
+    severity: MEDIUM
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-webhook/internal/dispatch/retry.go:31"
+    description: >
+      Failed webhook deliveries are retried immediately with a fixed 1-second
+      delay. When a destination is down, this generates a sustained burst of
+      requests that wastes resources, may trigger rate limiting or IP bans on
+      the destination, and can cascade into resource exhaustion on the
+      webhook worker.
+    fix_summary: >
+      Implement exponential backoff with jitter (e.g., 1s, 2s, 4s, 8s plus
+      random jitter). Cap the maximum number of retries and the maximum
+      backoff interval. Move failed deliveries to a dead-letter queue after
+      exhausting retries.
+    lesson: >
+      Fixed-interval retries amplify failures instead of absorbing them.
+      Exponential backoff with jitter is the standard pattern for distributed
+      retry logic because it reduces thundering herd effects.
+
+  - id: "M17"
+    title: "Missing rate limiting on password reset endpoint"
+    severity: MEDIUM
+    pattern_ref: "resilience/unenforced-limit"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/handler/reset.go:22"
+    description: >
+      The POST /auth/reset-password endpoint has no rate limiting. An attacker
+      can trigger unlimited password reset emails for any user, causing email
+      flooding (denial of service on the user's inbox), SMS cost abuse if
+      phone-based reset is supported, and enumeration of valid accounts via
+      response timing differences.
+    fix_summary: >
+      Apply per-IP and per-account rate limits (e.g., 3 requests per 15
+      minutes per account, 10 per IP). Return identical responses for
+      existing and non-existing accounts. Add CAPTCHA after the first
+      rate-limited attempt.
+    lesson: >
+      Every unauthenticated endpoint that triggers a side effect (email,
+      SMS, webhook) must have rate limiting. Without it, the endpoint
+      becomes an abuse amplifier.
+
+  - id: "M18"
+    title: "API key transmitted in URL query parameter"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/sensitive-log"
+    freebsd_sa_ref: ""
+    location: "altus-sdk/src/client.ts:89"
+    description: >
+      The SDK transmits the API key as a query parameter (?api_key=...).
+      Query parameters are logged in web server access logs, proxy logs,
+      browser history, and HTTP Referer headers, exposing the API key to
+      any system that processes URLs along the request path.
+    fix_summary: >
+      Transmit the API key in the Authorization header using the Bearer
+      scheme. Update all SDK versions and provide a migration guide for
+      consumers. Deprecate the query parameter method with a sunset date.
+    lesson: >
+      Secrets in URLs are visible to every system in the request path.
+      Always transmit credentials in HTTP headers, which are excluded from
+      standard access logs and Referer headers.
+
+  - id: "M19"
+    title: "Missing account lockout after failed login attempts"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/fail-open"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/handler/login.go:55"
+    description: >
+      The login endpoint does not implement account lockout or progressive
+      delays after failed authentication attempts. An attacker can perform
+      unlimited credential stuffing or brute-force attacks against any
+      account without triggering any defensive mechanism.
+    fix_summary: >
+      Implement progressive lockout: after 5 failed attempts, require CAPTCHA;
+      after 10 failed attempts, lock the account for 15 minutes with email
+      notification. Track failed attempts per account in a time-windowed
+      counter (Redis or database).
+    lesson: >
+      Login endpoints without lockout mechanisms are open invitations for
+      credential stuffing. Progressive lockout balances security with
+      usability by escalating defenses proportionally to suspicious activity.
+
+  - id: "M20"
+    title: "Predictable resource IDs (sequential integers)"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/idor"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/model/invoice.go:12"
+    description: >
+      Invoice and order resources use sequential integer IDs (auto-increment
+      primary keys) exposed directly in API URLs. An attacker can enumerate
+      all resources by incrementing the ID, and combined with any
+      authorization gap, access other users' invoices and orders.
+    fix_summary: >
+      Use UUIDs (v4 or v7) as the external-facing resource identifier.
+      Keep sequential integers as internal database primary keys for join
+      performance, but never expose them in API responses or URLs.
+    lesson: >
+      Predictable identifiers reduce the cost of exploiting authorization
+      flaws from "find the right ID" to "increment a counter." UUIDs
+      provide defense in depth against IDOR even when authorization checks
+      are temporarily broken.
+
+  # ──────────────────────────────────────────────────────────────────────
+  # M21-M34: Code Quality / Security Hygiene
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: "M21"
+    title: "Error messages contain internal service names"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/error-exposure"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/middleware/error.go:39"
+    description: >
+      Error responses returned to clients include internal service names,
+      hostnames, and gRPC endpoint addresses (e.g., "failed to reach
+      altus-billing.internal:4317"). This information maps internal
+      architecture for an attacker and aids in crafting targeted SSRF or
+      lateral movement attacks.
+    fix_summary: >
+      Map all internal errors to generic client-facing error codes and
+      messages. Log the full error detail server-side with a correlation ID.
+      Return only the correlation ID and a user-friendly message to the
+      client.
+    lesson: >
+      Error messages are an information channel. Every internal detail in a
+      client-facing error is reconnaissance data for an attacker. Use
+      correlation IDs to bridge the gap between user-facing and server-side
+      diagnostics.
+
+  - id: "M22"
+    title: "Debug endpoints accessible in production"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/dev-bypass"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/router/debug.go:14"
+    description: >
+      The /debug/pprof and /debug/vars endpoints are registered
+      unconditionally and are accessible without authentication in
+      production. These endpoints expose goroutine dumps, heap profiles,
+      memory statistics, and expvar metrics that reveal internal state,
+      library versions, and performance characteristics.
+    fix_summary: >
+      Guard debug endpoint registration behind an environment check
+      (NODE_ENV/GO_ENV). In non-development environments, either remove
+      debug routes entirely or bind them to a separate internal-only
+      listener with authentication.
+    lesson: >
+      Debug endpoints are designed to expose internal state. If they must
+      exist in production, bind them to an internal network interface and
+      require authentication. Never expose them on the public listener.
+
+  - id: "M23"
+    title: "Missing input length validation on text fields"
+    severity: MEDIUM
+    pattern_ref: "input-boundary/missing-range-check"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/handler/profile.go:78"
+    description: >
+      The profile update endpoint accepts bio, company_name, and address
+      fields without maximum length validation. An attacker can submit
+      megabyte-sized strings that consume database storage, slow down
+      queries via large row sizes, and cause rendering issues in the UI.
+    fix_summary: >
+      Add schema-level validation enforcing maximum lengths for all text
+      fields (e.g., bio: 500 chars, company_name: 200 chars). Validate at
+      the API handler before database writes. Add CHECK constraints in the
+      database as a defense-in-depth measure.
+    lesson: >
+      Every text input needs a maximum length. Without it, attackers control
+      how much storage and processing their input consumes. Validate at the
+      boundary and enforce at the database layer.
+
+  - id: "M24"
+    title: "File path traversal possible in download endpoint"
+    severity: MEDIUM
+    pattern_ref: "input-boundary/missing-range-check"
+    freebsd_sa_ref: "SA-26:08"
+    location: "altus-api/internal/handler/download.go:43"
+    description: >
+      The file download endpoint accepts a filename parameter and joins it
+      directly with the storage base path using filepath.Join. A filename
+      containing "../" sequences can traverse outside the intended directory
+      and read arbitrary files accessible to the process, including
+      /etc/passwd or application configuration files.
+    fix_summary: >
+      Use filepath.Clean followed by a check that the resulting absolute
+      path starts with the intended base directory. Alternatively, use an
+      allowlist of downloadable files or map filenames to UUIDs that
+      reference a database record.
+    lesson: >
+      Path traversal is a classic boundary validation failure analogous to
+      the FreeBSD buffer overflow: trusting the length (or structure) of
+      user input without verification. Always canonicalize paths and verify
+      they remain within the expected directory.
+
+  - id: "M25"
+    title: "Missing timeout on external HTTP client calls"
+    severity: MEDIUM
+    pattern_ref: "resilience/resource-leak"
+    freebsd_sa_ref: ""
+    location: "altus-integrations/internal/client/http.go:19"
+    description: >
+      The HTTP client used for external API calls (payment providers,
+      notification services) is created with Go's default http.Client, which
+      has no timeout. A slow or unresponsive external service causes the
+      calling goroutine to block indefinitely, eventually exhausting the
+      goroutine pool and causing cascading failures.
+    fix_summary: >
+      Set explicit timeouts on http.Client (e.g., Timeout: 10*time.Second).
+      Add context.WithTimeout per request for fine-grained control.
+      Implement circuit breakers for external dependencies.
+    lesson: >
+      Every outbound network call must have a timeout. The default zero
+      timeout means "wait forever," which is never the correct behavior for
+      a production system calling external services.
+
+  - id: "M26"
+    title: "Unencrypted PII in database backup"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "scripts/backup.sh:34"
+    description: >
+      The database backup script uses pg_dump and uploads the resulting SQL
+      file to S3 without encryption. The backup contains all user PII
+      (names, emails, phone numbers, addresses) in plaintext. A
+      misconfigured S3 bucket policy or compromised backup credentials
+      exposes the entire user database.
+    fix_summary: >
+      Encrypt backups using age or GPG before uploading to S3. Enable S3
+      server-side encryption (SSE-KMS) as an additional layer. Restrict
+      backup bucket access to a dedicated IAM role with minimal permissions.
+    lesson: >
+      Backups are a high-value target because they contain complete datasets
+      in a portable format. Encrypt at rest, restrict access, and test
+      restore procedures regularly to ensure encryption does not impede
+      disaster recovery.
+
+  - id: "M27"
+    title: "Default admin credentials in seed data"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/dev-bypass"
+    freebsd_sa_ref: ""
+    location: "altus-server/internal/seed/admin.go:23"
+    description: >
+      The database seeder creates an admin account with a well-known email
+      (admin@altus.local) and password (admin123). The seeder runs
+      unconditionally in all environments including production. An attacker
+      who knows or guesses the seed credentials gains full admin access.
+    fix_summary: >
+      Guard the seed function with an environment check that only allows
+      execution in development and test environments. For production, use
+      a separate provisioning flow that requires secure credential input
+      at deployment time.
+    lesson: >
+      Default credentials are the simplest possible authentication bypass.
+      Never ship seed data that includes credentials to any environment
+      where real users or data exist.
+
+  - id: "M28"
+    title: "Missing brute-force protection on login"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/fail-open"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/handler/login.go:28"
+    description: >
+      The login endpoint performs bcrypt comparison on every attempt without
+      any rate limiting or IP-based throttling. An attacker can submit
+      thousands of password guesses per minute from distributed IP addresses,
+      making credential stuffing attacks practical even against bcrypt-hashed
+      passwords.
+    fix_summary: >
+      Implement a multi-layer brute-force defense: per-IP rate limiting at
+      the reverse proxy, per-account attempt counting with progressive
+      delays, and CAPTCHA challenge after the threshold. Alert on anomalous
+      login failure rates.
+    lesson: >
+      Bcrypt slows individual hash computations but does not prevent
+      distributed attacks. Rate limiting and account lockout are required
+      to make brute-force infeasible at scale.
+
+  - id: "M29"
+    title: "JWT token lifetime too long (30 days)"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/permission-equivalent"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/token/jwt.go:41"
+    description: >
+      Access tokens are issued with a 30-day expiration. A stolen token
+      remains valid for up to 30 days, giving an attacker a wide window to
+      exfiltrate data and perform actions as the compromised user. Since
+      JWTs are stateless, there is no server-side mechanism to revoke a
+      compromised token before expiry.
+    fix_summary: >
+      Reduce access token lifetime to 15 minutes. Implement refresh token
+      rotation with a longer (7-day) lifetime. Add a token revocation
+      mechanism (blocklist in Redis) for emergency invalidation of
+      compromised tokens.
+    lesson: >
+      Token lifetime directly determines the blast radius of a token theft.
+      Short-lived access tokens with refresh token rotation limit exposure
+      while maintaining user experience.
+
+  - id: "M30"
+    title: "No refresh token rotation"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/permission-equivalent"
+    freebsd_sa_ref: ""
+    location: "altus-auth/internal/token/refresh.go:55"
+    description: >
+      Refresh tokens are reusable: the same refresh token can be exchanged
+      for new access tokens indefinitely without being rotated. If a refresh
+      token is stolen, the attacker can maintain persistent access even after
+      the legitimate user's session appears to end, because both parties
+      hold a valid token.
+    fix_summary: >
+      Implement refresh token rotation: each time a refresh token is used,
+      issue a new refresh token and invalidate the old one. If a previously
+      invalidated refresh token is presented, revoke the entire token family
+      to detect and respond to token theft.
+    lesson: >
+      Refresh token rotation creates a detection mechanism for token theft.
+      When both the attacker and legitimate user try to use the same token,
+      the reuse triggers a revocation that limits the blast radius.
+
+  - id: "M31"
+    title: "GraphQL query depth not limited"
+    severity: MEDIUM
+    pattern_ref: "input-boundary/unbounded-read"
+    freebsd_sa_ref: "SA-26:08"
+    location: "altus-api/internal/graphql/server.go:34"
+    description: >
+      The GraphQL server does not enforce query depth or complexity limits.
+      An attacker can craft deeply nested queries (e.g., user > friends >
+      friends > friends...) that cause exponential database query expansion,
+      leading to CPU and memory exhaustion on the API server and database.
+    fix_summary: >
+      Add query depth limiting (max depth 10), query complexity analysis
+      with a cost budget, and a query timeout. Use a library such as
+      graphql-depth-limit or implement custom validation rules. Log and
+      reject queries that exceed limits.
+    lesson: >
+      GraphQL's flexibility is also its attack surface. Without depth and
+      complexity limits, a single query can consume unbounded resources.
+      This is the API equivalent of an unbounded read at the input boundary.
+
+  - id: "M32"
+    title: "Missing request ID for log correlation"
+    severity: MEDIUM
+    pattern_ref: "resilience/audit-drop"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/middleware/logging.go:15"
+    description: >
+      Requests are logged without a unique correlation ID. When investigating
+      security incidents, there is no way to trace a single request across
+      API gateway, application server, database, and external service logs.
+      This increases incident response time and may cause investigators to
+      miss related events.
+    fix_summary: >
+      Generate a UUID request ID in the API gateway or first middleware.
+      Propagate it via X-Request-ID header to all downstream services.
+      Include the request ID in every log entry and return it in error
+      responses to enable client-to-server correlation.
+    lesson: >
+      Log correlation is a security control, not just an observability
+      convenience. Without it, distributed attacks that span multiple
+      services are invisible to individual service logs.
+
+  - id: "M33"
+    title: "Database connection string in environment without encryption"
+    severity: MEDIUM
+    pattern_ref: "info-leakage/config-leak"
+    freebsd_sa_ref: ""
+    location: "deploy/k8s/base/configmap.yaml:12"
+    description: >
+      The full PostgreSQL connection string (including username, password,
+      and hostname) is stored in a Kubernetes ConfigMap rather than a Secret.
+      ConfigMaps are stored unencrypted in etcd by default and are visible
+      to any user with read access to the namespace, making database
+      credentials accessible to a wider audience than intended.
+    fix_summary: >
+      Move the connection string to a Kubernetes Secret. Enable etcd
+      encryption at rest. For production workloads, use an external secret
+      manager (Vault, AWS Secrets Manager) with the External Secrets
+      Operator to inject credentials at runtime.
+    lesson: >
+      ConfigMaps are not a secret store. Any credential or connection string
+      in a ConfigMap is effectively plaintext accessible to anyone with
+      namespace read access. Always use Kubernetes Secrets with etcd
+      encryption or an external secret manager.
+
+  - id: "M34"
+    title: "Unused but active API keys not rotated"
+    severity: MEDIUM
+    pattern_ref: "auth-flow/permission-equivalent"
+    freebsd_sa_ref: ""
+    location: "altus-api/internal/apikey/manager.go:92"
+    description: >
+      The API key management system has no expiration or last-used tracking.
+      API keys issued during early development and testing remain active
+      indefinitely even when no longer in use. These forgotten keys represent
+      persistent access credentials that may have been shared in insecure
+      channels (Slack, email, documentation).
+    fix_summary: >
+      Add last_used_at tracking to API keys. Implement automatic deactivation
+      for keys unused for 90 days with email notification to the owner.
+      Enforce a maximum key lifetime of 1 year with mandatory rotation.
+      Provide a key rotation API that allows seamless replacement.
+    lesson: >
+      Every active credential is an attack surface. API keys without
+      expiration or usage tracking accumulate as forgotten backdoors.
+      Implement lifecycle management for all credential types.

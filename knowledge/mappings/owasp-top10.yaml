@@ -1,0 +1,150 @@
+# OWASP Top 10 (2021) to sentinella2 Pattern Mappings
+# Maps each OWASP category to one or more sentinella2 detection patterns.
+# Coverage percentages derived from perseworks 93-vulnerability audit.
+
+schema_version: "1.0"
+kind: OWASPMapping
+owasp_version: "2021"
+
+categories:
+  - id: "A01"
+    name: "Broken Access Control"
+    description: >
+      Access control enforces policy such that users cannot act outside of
+      their intended permissions. Failures lead to unauthorized information
+      disclosure, modification, or destruction of data.
+    pattern_refs:
+      - "auth-flow/idor"
+      - "auth-flow/csrf-missing"
+      - "auth-flow/permission-equivalent"
+      - "auth-flow/missing-middleware"
+    coverage: "34% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:05 — NFS credential forwarding across exports"
+      - "SA-26:03 — ZFS dataset permission bypass"
+
+  - id: "A02"
+    name: "Cryptographic Failures"
+    description: >
+      Failures related to cryptography that lead to exposure of sensitive
+      data. Includes weak algorithms, improper key management, and missing
+      encryption.
+    pattern_refs:
+      - "auth-flow/signature-skip"
+      - "auth-flow/timing-sidechannel"
+    coverage: "8% of perseworks findings"
+    freebsd_analogs:
+      - "SA-25:05 — VerifyHostKeyDNS SSHFP bypass"
+      - "SA-25:08 — OpenSSH timing side-channel"
+
+  - id: "A03"
+    name: "Injection"
+    description: >
+      User-supplied data is sent to an interpreter as part of a command or
+      query. Includes SQL injection, OS command injection, XSS, and LDAP
+      injection.
+    pattern_refs:
+      - "injection/command-injection"
+      - "injection/content-injection"
+      - "input-boundary/unbounded-read"
+    coverage: "18% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:08 — RPCSEC_GSS stack buffer overflow"
+      - "SA-25:12 — ctl(4) iSCSI target buffer overflow"
+      - "SA-25:10 — libnv heap overflow"
+
+  - id: "A04"
+    name: "Insecure Design"
+    description: >
+      Risks related to design and architectural flaws. Calls for more use
+      of threat modeling, secure design patterns, and reference architectures.
+    pattern_refs:
+      - "auth-flow/race-condition"
+      - "isolation/shared-boundary"
+      - "trust-chain/oidc-origin-mismatch"
+    coverage: "12% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:04 — jail escape via FD passing"
+      - "SA-25:09 — ipfw TOCTOU race condition"
+
+  - id: "A05"
+    name: "Security Misconfiguration"
+    description: >
+      Missing or incorrect security configuration — default credentials,
+      unnecessary features enabled, overly permissive settings, missing
+      security hardening.
+    pattern_refs:
+      - "info-leakage/config-leak"
+      - "isolation/excessive-perms"
+    coverage: "11% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:02 — jail root privilege escalation"
+      - "SA-25:02 — amd64 page table permission escalation"
+
+  - id: "A06"
+    name: "Vulnerable and Outdated Components"
+    description: >
+      Using components with known vulnerabilities. Includes libraries,
+      frameworks, and other software modules running with the same
+      privileges as the application.
+    pattern_refs:
+      - "trust-chain/upstream-unverified"
+    coverage: "3% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:01 — OpenSSL certificate verification bypass"
+
+  - id: "A07"
+    name: "Identification and Authentication Failures"
+    description: >
+      Confirmation of identity, authentication, and session management
+      is critical. Includes weak passwords, credential stuffing, improper
+      session handling.
+    pattern_refs:
+      - "auth-flow/signature-skip"
+      - "auth-flow/timing-sidechannel"
+      - "trust-chain/oidc-origin-mismatch"
+    coverage: "9% of perseworks findings"
+    freebsd_analogs:
+      - "SA-25:05 — VerifyHostKeyDNS SSHFP bypass"
+      - "SA-25:08 — OpenSSH timing enumeration"
+
+  - id: "A08"
+    name: "Software and Data Integrity Failures"
+    description: >
+      Code and infrastructure that does not protect against integrity
+      violations. Includes CI/CD pipeline insecurity, auto-update without
+      verification, and untrusted deserialization.
+    pattern_refs:
+      - "trust-chain/upstream-unverified"
+      - "input-boundary/unbounded-read"
+    coverage: "5% of perseworks findings"
+    freebsd_analogs:
+      - "SA-26:01 — OpenSSL certificate verification bypass"
+      - "SA-25:10 — libnv deserialization overflow"
+
+  - id: "A09"
+    name: "Security Logging and Monitoring Failures"
+    description: >
+      Insufficient logging, detection, monitoring, and active response.
+      Includes missing audit logs, logs not monitored for suspicious
+      activity, and sensitive data in logs.
+    pattern_refs:
+      - "info-leakage/sensitive-log"
+      - "info-leakage/error-exposure"
+      - "info-leakage/console-leak"
+    coverage: "7% of perseworks findings"
+    freebsd_analogs:
+      - "SA-25:04 — ktrace sensitive data exposure"
+
+  - id: "A10"
+    name: "Server-Side Request Forgery (SSRF)"
+    description: >
+      SSRF flaws occur when a web application fetches a remote resource
+      without validating the user-supplied URL. Allows attackers to coerce
+      the application into sending crafted requests to unexpected destinations.
+    pattern_refs:
+      - "injection/url-injection"
+      - "trust-chain/dns-rebinding"
+    coverage: "6% of perseworks findings"
+    freebsd_analogs:
+      - "SA-25:03 — fetch(1) URL injection via redirect"
