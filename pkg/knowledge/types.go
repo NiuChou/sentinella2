@@ -27,18 +27,64 @@ func (s Severity) IsValid() bool {
 	return false
 }
 
+// Status constants define the maturity lifecycle for a pattern rule.
+// Inspired by Sigma's status field.
+const (
+	StatusExperimental = "experimental"
+	StatusTesting      = "testing"
+	StatusStable       = "stable"
+	StatusDeprecated   = "deprecated"
+)
+
 // Pattern represents a vulnerability detection pattern with language-specific
 // rules and fix templates.
 type Pattern struct {
-	ID          string    `yaml:"id"`
-	Name        string    `yaml:"name"`
-	Description string    `yaml:"description"`
-	Severity    Severity  `yaml:"severity"`
-	OWASP       []string  `yaml:"owasp"`
-	FreeBSDSA   []string  `yaml:"freebsd_sa"`
-	Detection   Detection `yaml:"detection"`
-	Fix         Fix       `yaml:"fix"`
-	Cases       []string  `yaml:"cases"`
+	ID               string   `yaml:"id"`
+	Name             string   `yaml:"name"`
+	Description      string   `yaml:"description"`
+	Severity         Severity `yaml:"severity"`
+	OWASP            []string `yaml:"owasp"`
+	FreeBSDSA        []string `yaml:"freebsd_sa"`
+	Detection        Detection `yaml:"detection"`
+	Fix              Fix      `yaml:"fix"`
+	Cases            []string `yaml:"cases"`
+	Status           string   `yaml:"status,omitempty"`            // experimental, testing, stable, deprecated
+	ConfidenceWeight float64  `yaml:"confidence_weight,omitempty"` // multiplier, default 1.0
+}
+
+// EffectiveConfidenceWeight returns the confidence weight for a pattern based on its status.
+// If ConfidenceWeight is explicitly set, use that. Otherwise derive from status.
+func (p Pattern) EffectiveConfidenceWeight() float64 {
+	if p.ConfidenceWeight > 0 {
+		return p.ConfidenceWeight
+	}
+	switch p.Status {
+	case StatusExperimental:
+		return 0.5
+	case StatusTesting:
+		return 0.75
+	case StatusStable, "":
+		return 1.0 // default = stable
+	case StatusDeprecated:
+		return 0.25
+	default:
+		return 1.0
+	}
+}
+
+// IsVisibleByDefault returns whether this pattern's findings show in default output.
+func (p Pattern) IsVisibleByDefault() bool {
+	switch p.Status {
+	case StatusExperimental, StatusDeprecated:
+		return false
+	default:
+		return true
+	}
+}
+
+// CanBlockCI returns whether findings from this pattern can block CI.
+func (p Pattern) CanBlockCI() bool {
+	return p.Status == StatusStable || p.Status == ""
 }
 
 // Detection holds the detection strategy for a pattern, including per-language

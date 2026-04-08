@@ -1,0 +1,34 @@
+schema_version: "1.0"
+kind: calibration_priors
+description: "Built-in priors from 93-vulnerability audit experience"
+buckets:
+  "auth-flow/missing-auth-check:*.controller.ts":
+    alpha: 1
+    beta: 20
+    note: "NestJS class guard commonly missed"
+  "auth-flow/missing-auth-check:*.py":
+    alpha: 5
+    beta: 5
+    note: "Python auth detection imperfect"
+  "isolation/data-isolation:*.sql":
+    alpha: 1
+    beta: 10
+    note: "schema-qualified table names common"
+  "input-boundary/unbounded-read:*.go":
+    alpha: 3
+    beta: 3
+    note: "Go bounded reads vary by framework"
+  "resilience/error-swallow:*.go":
+    alpha: 2
+    beta: 8
+    note: "Go _ = err is standard cleanup pattern"
+global_priors:
+  "auth-flow/missing-auth-check":
+    alpha: 1
+    beta: 1
+  "injection/command-injection":
+    alpha: 3
+    beta: 1
+  "info-leakage/secret-in-source":
+    alpha: 5
+    beta: 1

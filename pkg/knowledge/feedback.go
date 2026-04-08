@@ -19,12 +19,18 @@ const (
 	VerdictConfirmed     Verdict = "confirmed"
 	VerdictFalsePositive Verdict = "false_positive"
 	VerdictMissed        Verdict = "missed"
+	// VerdictAccepted means the user acknowledges the risk but chooses not to
+	// remediate. It does NOT feed into the Bayesian false-positive model.
+	VerdictAccepted Verdict = "accepted"
+	// VerdictFixed means the vulnerability was remediated; it counts as a true
+	// positive in the Bayesian model.
+	VerdictFixed Verdict = "fixed"
 )
 
 // IsValid reports whether v is a recognised verdict value.
 func (v Verdict) IsValid() bool {
 	switch v {
-	case VerdictConfirmed, VerdictFalsePositive, VerdictMissed:
+	case VerdictConfirmed, VerdictFalsePositive, VerdictMissed, VerdictAccepted, VerdictFixed:
 		return true
 	}
 	return false

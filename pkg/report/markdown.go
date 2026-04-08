@@ -11,9 +11,10 @@ import (
 // MarkdownReporter outputs formatted Markdown suitable for GitHub PRs or Notion.
 type MarkdownReporter struct{}
 
-// Report writes findings as a Markdown document with severity sections.
+// Report writes findings as a Markdown document grouped by confidence grade.
 func (m *MarkdownReporter) Report(w io.Writer, result scan.Result) error {
 	summary := result.Summary()
+	graded := scan.GradeFindings(result.Findings())
 
 	if err := writeMDHeader(w, summary); err != nil {
 		return fmt.Errorf("failed to write markdown header: %w", err)
@@ -23,13 +24,21 @@ func (m *MarkdownReporter) Report(w io.Writer, result scan.Result) error {
 		return fmt.Errorf("failed to write summary table: %w", err)
 	}
 
-	for _, sev := range knowledge.ValidSeverities() {
-		findings := result.FindingsBySeverity(sev)
-		if len(findings) == 0 {
+	gradeGroups := []struct {
+		grade    scan.ConfidenceGrade
+		findings []scan.Finding
+	}{
+		{scan.GradeConfirmed, graded.Confirmed},
+		{scan.GradeLikely, graded.Likely},
+		{scan.GradeSuspect, graded.Suspect},
+	}
+
+	for _, g := range gradeGroups {
+		if len(g.findings) == 0 {
 			continue
 		}
-		if err := writeMDSeveritySection(w, sev, findings); err != nil {
-			return fmt.Errorf("failed to write %s section: %w", sev, err)
+		if err := writeMDGradeSection(w, g.grade, g.findings); err != nil {
+			return fmt.Errorf("failed to write %s section: %w", g.grade, err)
 		}
 	}
 
@@ -99,6 +108,51 @@ func writeMDSeveritySection(
 	return err
 }
 
+// writeMDGradeSection writes a Markdown section for a confidence grade bucket.
+func writeMDGradeSection(w io.Writer, grade scan.ConfidenceGrade, findings []scan.Finding) error {
+	emoji := gradeEmoji(grade)
+	if _, err := fmt.Fprintf(w, "## %s %s (%d)\n\n", emoji, string(grade), len(findings)); err != nil {
+		return err
+	}
+
+	for _, f := range findings {
+		if err := writeMDGradeFinding(w, f); err != nil {
+			return err
+		}
+	}
+
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+// writeMDGradeFinding writes a single finding line with severity and confidence info.
+func writeMDGradeFinding(w io.Writer, f scan.Finding) error {
+	_, err := fmt.Fprintf(w, "- **`%s`** `%s:%d` [%s, %.0f%%] \u2014 %s\n",
+		f.RuleID, f.File, f.Line, f.Severity, f.Confidence*100, f.Message)
+	if err != nil {
+		return err
+	}
+
+	if f.FixHint != "" {
+		_, err = fmt.Fprintf(w, "  - Fix: %s\n", f.FixHint)
+	}
+	return err
+}
+
+// gradeEmoji returns an emoji for a confidence grade.
+func gradeEmoji(grade scan.ConfidenceGrade) string {
+	switch grade {
+	case scan.GradeConfirmed:
+		return "\u2705" // green check
+	case scan.GradeLikely:
+		return "\u26a0\ufe0f" // warning
+	case scan.GradeSuspect:
+		return "\u2753" // question mark
+	default:
+		return ""
+	}
+}
+
 func writeMDFinding(w io.Writer, f scan.Finding) error {
 	_, err := fmt.Fprintf(w, "- **`%s`** `%s:%d` \u2014 %s\n",
 		f.RuleID, f.File, f.Line, f.Message)
@@ -119,7 +173,7 @@ func writeMDLayerSection(w io.Writer, layer scan.LayerAssessment) error {
 	}
 
 	if len(layer.Checks) == 0 {
-		_, err := fmt.Fprintln(w, "No checks defined.\n")
+		_, err := fmt.Fprintln(w, "No checks defined.")
 		return err
 	}
 

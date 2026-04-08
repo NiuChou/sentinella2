@@ -30,6 +30,12 @@ func main() {
 		err = runCheckLayers(os.Args[2:])
 	case "kb":
 		err = runKB(os.Args[2:])
+	case "memory":
+		err = runMemory(os.Args[2:])
+	case "triage":
+		err = runTriage(os.Args[2:])
+	case "learn":
+		err = runLearn(os.Args[2:])
 	case "init":
 		err = runInit()
 	case "version":
@@ -152,6 +158,9 @@ Commands:
   audit         Deep audit with LLM analysis (Tier 2+, requires provider config)
   check-layers  Assess defense-in-depth layers
   kb            Knowledge base management (update, feedback, tune, synthesize)
+  memory        Context memory management (list, add, remove, validate)
+  triage        Interactively label uncertain findings to improve calibration
+  learn         Analyze labeled findings and suggest rules from patterns
   init          Create default configuration file
   version       Print version
   help          Show this help
@@ -160,8 +169,14 @@ Examples:
   sentinella2 scan ./src --format json
   sentinella2 audit ./src --provider openai-compatible --model gpt-4o --base-url https://api.openai.com/v1
   sentinella2 check-layers ./infrastructure --format markdown
+  sentinella2 triage ./src --batch 20
   sentinella2 kb update --since 7d
   sentinella2 kb feedback mark finding-123 false_positive --reason "test code"
   sentinella2 kb tune --dry-run
+  sentinella2 memory list
+  sentinella2 memory add --scope project "Auth handled at API Gateway"
+  sentinella2 memory add --scope scanner --scanner S7 "NestJS @UseGuards applied globally"
+  sentinella2 learn --feedback-dir .sentinella2/feedback
 `)
+
 }

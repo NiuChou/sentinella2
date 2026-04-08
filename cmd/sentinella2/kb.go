@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/perseworks/sentinella2/pkg/knowledge"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,6 +43,8 @@ func runKB(args []string) error {
 		return runKBSynthesize(args[1:])
 	case "review":
 		return runKBReview(args[1:])
+	case "calibration":
+		return runKBCalibration(args[1:])
 	default:
 		printKBUsage()
 		return fmt.Errorf("unknown kb subcommand: %s", args[0])
@@ -53,18 +56,19 @@ func printKBUsage() {
 	fmt.Fprintf(os.Stderr, `sentinella2 kb - Knowledge base management
 
 Subcommands:
-  update      Fetch configured vulnerability feeds
-  diff        Show pending incremental changes
-  apply       Apply pending entries to local KB
-  status      Show sync status, feedback stats, pending entries
-  add         Register a new community knowledge source
-  remove      Remove a registered source
-  list        List all registered knowledge sources
-  feedback    Record feedback for a finding (mark subcommand)
-  stats       Show feedback statistics per pattern
-  tune        Apply feedback-driven tuning to patterns
-  synthesize  Use LLM to analyze feed entries and generate candidates
-  review      List pending candidates for human review
+  update        Fetch configured vulnerability feeds
+  diff          Show pending incremental changes
+  apply         Apply pending entries to local KB
+  status        Show sync status, feedback stats, pending entries
+  add           Register a new community knowledge source
+  remove        Remove a registered source
+  list          List all registered knowledge sources
+  feedback      Record feedback for a finding (mark subcommand)
+  stats         Show feedback statistics per pattern
+  tune          Apply feedback-driven tuning to patterns
+  synthesize    Use LLM to analyze feed entries and generate candidates
+  review        List pending candidates for human review
+  calibration   Manage shared calibration priors per tech stack
 `)
 }
 
@@ -720,4 +724,75 @@ func parseDuration(s string) (time.Duration, error) {
 	default:
 		return time.ParseDuration(s)
 	}
+}
+
+// runKBCalibration dispatches kb calibration subcommands.
+func runKBCalibration(args []string) error {
+	if len(args) < 1 {
+		printKBCalibrationUsage()
+		return fmt.Errorf("usage: sentinella2 kb calibration <subcommand>")
+	}
+
+	switch args[0] {
+	case "export":
+		return runKBCalibrationExport(args[1:])
+	default:
+		printKBCalibrationUsage()
+		return fmt.Errorf("unknown kb calibration subcommand: %s", args[0])
+	}
+}
+
+// printKBCalibrationUsage prints calibration subcommand help.
+func printKBCalibrationUsage() {
+	fmt.Fprintf(os.Stderr, `sentinella2 kb calibration - Shared calibration prior management
+
+Subcommands:
+  export   Export calibration data to the shared stack-specific file
+
+Usage:
+  sentinella2 kb calibration export --stack <stack-id> [--path <calibration.json>]
+`)
+}
+
+// runKBCalibrationExport exports calibration data to the shared stack file.
+func runKBCalibrationExport(args []string) error {
+	fs := flag.NewFlagSet("kb calibration export", flag.ContinueOnError)
+	stackFlag := fs.String("stack", "", "tech stack ID to export for (e.g. nestjs, fastapi, gin)")
+	pathFlag := fs.String("path", "", "path to calibration.json (default: ~/.sentinella2/calibration.json)")
+
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	if *stackFlag == "" {
+		return fmt.Errorf("--stack flag is required (e.g. --stack nestjs)")
+	}
+
+	calibPath := *pathFlag
+	if calibPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
+		}
+		calibPath = filepath.Join(home, ".sentinella2", "calibration.json")
+	}
+
+	cs, err := knowledge.OpenCalibrationStore(calibPath, nil)
+	if err != nil {
+		return fmt.Errorf("open calibration store: %w", err)
+	}
+
+	stack := knowledge.TechStack{ID: *stackFlag, Name: *stackFlag}
+
+	if err := cs.ExportForStack(stack); err != nil {
+		return err
+	}
+
+	dir, err := knowledge.SharedCalibrationDir()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Exported calibration for stack %q to %s/%s.json\n", *stackFlag, dir, *stackFlag)
+	return nil
 }

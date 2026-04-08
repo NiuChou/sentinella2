@@ -20,6 +20,7 @@ type Config struct {
 	Knowledge     KnowledgeConfig     `yaml:"knowledge"`
 	Feedback      FeedbackConfig      `yaml:"feedback"`
 	Feeds         FeedsConfig         `yaml:"feeds"`
+	RuleLifecycle RuleLifecycleConfig `yaml:"rule_lifecycle"`
 }
 
 // ScanConfig controls deterministic (Tier 1) scanning behavior.
@@ -68,6 +69,26 @@ type FeedsConfig struct {
 	Sources  []string `yaml:"sources"`  // feed IDs to enable: ["nvd", "freebsd-sa", "github-advisory"]
 }
 
+// RuleLifecycleConfig controls automatic promotion and deprecation of pattern rules.
+type RuleLifecycleConfig struct {
+	PromoteToTesting PromotionConfig `yaml:"promote_to_testing"`
+	PromoteToStable  PromotionConfig `yaml:"promote_to_stable"`
+	AutoDeprecate    DeprecateConfig `yaml:"auto_deprecate"`
+}
+
+// PromotionConfig holds the thresholds required to promote a pattern to the next status.
+type PromotionConfig struct {
+	MinScans         int     `yaml:"min_scans"`
+	MinTruePositives int     `yaml:"min_true_positives"`
+	MinConfidence    float64 `yaml:"min_confidence,omitempty"` // only for stable
+}
+
+// DeprecateConfig holds the thresholds for automatically deprecating a pattern.
+type DeprecateConfig struct {
+	MaxFalsePositiveRate float64 `yaml:"max_false_positive_rate"`
+	MinSamples           int     `yaml:"min_samples"`
+}
+
 const configFileName = ".sentinella2.yaml"
 
 // Default returns the default configuration with sensible zero-config values.
@@ -102,6 +123,21 @@ func Default() Config {
 			Enabled:  false,
 			Schedule: "weekly",
 			Sources:  []string{"nvd", "freebsd-sa", "github-advisory"},
+		},
+		RuleLifecycle: RuleLifecycleConfig{
+			PromoteToTesting: PromotionConfig{
+				MinScans:         5,
+				MinTruePositives: 3,
+			},
+			PromoteToStable: PromotionConfig{
+				MinScans:         20,
+				MinConfidence:    0.70,
+				MinTruePositives: 10,
+			},
+			AutoDeprecate: DeprecateConfig{
+				MaxFalsePositiveRate: 0.95,
+				MinSamples:           20,
+			},
 		},
 	}
 }
@@ -195,6 +231,29 @@ func merge(base, overlay Config) Config {
 	}
 	if len(overlay.Feeds.Sources) > 0 {
 		result.Feeds.Sources = overlay.Feeds.Sources
+	}
+
+	// RuleLifecycle config.
+	if overlay.RuleLifecycle.PromoteToTesting.MinScans > 0 {
+		result.RuleLifecycle.PromoteToTesting.MinScans = overlay.RuleLifecycle.PromoteToTesting.MinScans
+	}
+	if overlay.RuleLifecycle.PromoteToTesting.MinTruePositives > 0 {
+		result.RuleLifecycle.PromoteToTesting.MinTruePositives = overlay.RuleLifecycle.PromoteToTesting.MinTruePositives
+	}
+	if overlay.RuleLifecycle.PromoteToStable.MinScans > 0 {
+		result.RuleLifecycle.PromoteToStable.MinScans = overlay.RuleLifecycle.PromoteToStable.MinScans
+	}
+	if overlay.RuleLifecycle.PromoteToStable.MinConfidence > 0 {
+		result.RuleLifecycle.PromoteToStable.MinConfidence = overlay.RuleLifecycle.PromoteToStable.MinConfidence
+	}
+	if overlay.RuleLifecycle.PromoteToStable.MinTruePositives > 0 {
+		result.RuleLifecycle.PromoteToStable.MinTruePositives = overlay.RuleLifecycle.PromoteToStable.MinTruePositives
+	}
+	if overlay.RuleLifecycle.AutoDeprecate.MaxFalsePositiveRate > 0 {
+		result.RuleLifecycle.AutoDeprecate.MaxFalsePositiveRate = overlay.RuleLifecycle.AutoDeprecate.MaxFalsePositiveRate
+	}
+	if overlay.RuleLifecycle.AutoDeprecate.MinSamples > 0 {
+		result.RuleLifecycle.AutoDeprecate.MinSamples = overlay.RuleLifecycle.AutoDeprecate.MinSamples
 	}
 
 	return result

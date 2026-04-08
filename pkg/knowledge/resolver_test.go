@@ -1,7 +1,7 @@
 package knowledge
 
 import (
-	"io/fs"
+	"os"
 	"testing"
 	"testing/fstest"
 )
@@ -229,9 +229,6 @@ func writePatternFile(t *testing.T, dir, filename, id, severity string) {
 	t.Helper()
 
 	patternsDir := dir + "/patterns"
-	if err := fs.ValidPath(patternsDir); err == nil {
-		// Create the patterns subdirectory.
-	}
 
 	if err := mkdirAll(patternsDir); err != nil {
 		t.Fatalf("mkdir patterns: %v", err)
@@ -257,9 +254,9 @@ func writeFile(path string, data []byte) error {
 func osWriteHelper(op, path string, data []byte) error {
 	switch op {
 	case "mkdir":
-		return osMkdirAll(path)
+		return os.MkdirAll(path, 0o755)
 	case "write":
-		return osWriteFile(path, data)
+		return os.WriteFile(path, data, 0o644)
 	default:
 		return nil
 	}

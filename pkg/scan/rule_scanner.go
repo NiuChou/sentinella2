@@ -115,6 +115,11 @@ func (s *RuleScanner) Scan(ctx context.Context, targetDir string) (Result, error
 		return Result{}, fmt.Errorf("walking target directory: %w", walkErr)
 	}
 
+	// Post-processing: cross-scanner correlation adjustment.
+	if s.opts.correlationCfg != nil && len(findings) > 0 {
+		findings = AdjustByCorrelation(findings, *s.opts.correlationCfg)
+	}
+
 	return NewResult(findings, absDir, len(patterns), filesScanned, time.Since(start)), nil
 }
 
@@ -189,6 +194,13 @@ func (s *RuleScanner) scanFile(
 			}
 		}
 
+		// Memory check: skip this pattern if memory declares it not applicable.
+		if s.opts.memories != nil {
+			if memorySkipsPattern(s.opts.memories.ForScanner(pat.ID), pat.ID) {
+				continue
+			}
+		}
+
 		matches, err := s.regexMatcher.MatchWithNegative(
 			rule.Pattern, rule.NegativePattern, content, proximityLines,
 		)
@@ -197,6 +209,16 @@ func (s *RuleScanner) scanFile(
 		}
 
 		for _, m := range matches {
+			conf := 0.5 // cold start default
+			if s.opts.calibration != nil {
+				conf = s.opts.calibration.ConfidenceFor(pat.ID, relPath)
+			}
+			// Apply lifecycle weight (experimental=0.5, testing=0.75, stable=1.0)
+			conf *= pat.EffectiveConfidenceWeight()
+			if conf > 1.0 {
+				conf = 1.0
+			}
+
 			findings = append(findings, Finding{
 				RuleID:      pat.ID,
 				PatternRef:  pat.ID,
@@ -208,6 +230,7 @@ func (s *RuleScanner) scanFile(
 				MatchedText: m.Text,
 				Context:     m.Context,
 				FixHint:     pat.Fix.Abstract,
+				Confidence:  conf,
 			})
 		}
 	}
@@ -276,6 +299,18 @@ func extractGlob(contextField string) string {
 		}
 	}
 	return strings.TrimSpace(contextField)
+}
+
+// memorySkipsPattern returns true if any memory declares the given pattern
+// should be skipped. A scanner-scoped memory with Scanner matching patternID
+// is treated as a not-applicable declaration for that pattern on the matched files.
+func memorySkipsPattern(mems []knowledge.Memory, patternID string) bool {
+	for _, m := range mems {
+		if m.Scope == knowledge.ScopeScanner && m.Scanner == patternID {
+			return true
+		}
+	}
+	return false
 }
 
 // readFileBounded reads a file up to maxFileSize bytes. Returns an error

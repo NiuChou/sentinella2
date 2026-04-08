@@ -25,6 +25,7 @@ type TextReporter struct{}
 // Report writes findings grouped by severity with ANSI color coding.
 func (t *TextReporter) Report(w io.Writer, result scan.Result) error {
 	summary := result.Summary()
+	graded := scan.GradeFindings(result.Findings())
 
 	if err := writeHeader(w, summary); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
@@ -40,7 +41,7 @@ func (t *TextReporter) Report(w io.Writer, result scan.Result) error {
 		}
 	}
 
-	return writeSummaryFooter(w, summary)
+	return writeSummaryFooter(w, summary, graded)
 }
 
 // ReportLayers writes the defense layer assessment with status indicators.
@@ -87,8 +88,11 @@ func writeSeverityGroup(w io.Writer, sev knowledge.Severity, findings []scan.Fin
 }
 
 func writeFinding(w io.Writer, f scan.Finding, color string) error {
-	_, err := fmt.Fprintf(w, "  %s[%s]%s %s:%d \u2014 %s\n",
-		color, f.RuleID, colorReset, f.File, f.Line, f.Message)
+	grade := f.Grade()
+	_, err := fmt.Fprintf(w, "  %s[%s]%s %s (%s) (%d%%)  %s:%d \u2014 %s\n",
+		color, f.RuleID, colorReset,
+		string(f.Severity), string(grade), int(f.Confidence*100),
+		f.File, f.Line, f.Message)
 	if err != nil {
 		return err
 	}
@@ -99,7 +103,7 @@ func writeFinding(w io.Writer, f scan.Finding, color string) error {
 	return err
 }
 
-func writeSummaryFooter(w io.Writer, s scan.Summary) error {
+func writeSummaryFooter(w io.Writer, s scan.Summary, graded scan.GradedResult) error {
 	_, err := fmt.Fprintf(w,
 		"%s%sSummary%s: %s%d critical%s, %s%d high%s, %s%d medium%s, %s%d low%s (%d total)\n",
 		colorBold, colorBlue, colorReset,
@@ -108,6 +112,17 @@ func writeSummaryFooter(w io.Writer, s scan.Summary) error {
 		colorBlue, s.Medium, colorReset,
 		colorGray, s.Low, colorReset,
 		s.Total,
+	)
+	if err != nil {
+		return err
+	}
+
+	nConfirmed := len(graded.Confirmed)
+	nLikely := len(graded.Likely)
+	nSuspect := len(graded.Suspect)
+	_, err = fmt.Fprintf(w,
+		"%d findings (%d Confirmed, %d Likely) \u2014 %d Suspect hidden, use --show-suspect\n",
+		nConfirmed+nLikely, nConfirmed, nLikely, nSuspect,
 	)
 	return err
 }

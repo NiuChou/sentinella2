@@ -30,15 +30,17 @@ type jsonSummary struct {
 
 // jsonFinding is the JSON representation of scan.Finding.
 type jsonFinding struct {
-	RuleID      string `json:"rule_id"`
-	PatternRef  string `json:"pattern_ref"`
-	Severity    string `json:"severity"`
-	File        string `json:"file"`
-	Line        int    `json:"line"`
-	Column      int    `json:"column"`
-	Message     string `json:"message"`
-	MatchedText string `json:"matched_text,omitempty"`
-	FixHint     string `json:"fix_hint,omitempty"`
+	RuleID      string  `json:"rule_id"`
+	PatternRef  string  `json:"pattern_ref"`
+	Severity    string  `json:"severity"`
+	File        string  `json:"file"`
+	Line        int     `json:"line"`
+	Column      int     `json:"column"`
+	Message     string  `json:"message"`
+	MatchedText string  `json:"matched_text,omitempty"`
+	FixHint     string  `json:"fix_hint,omitempty"`
+	Confidence  float64 `json:"confidence"`
+	Grade       string  `json:"grade"`
 }
 
 // jsonLayerOutput is the top-level JSON envelope for layer assessments.
@@ -90,6 +92,8 @@ func toJSONOutput(result scan.Result) jsonOutput {
 			Message:     f.Message,
 			MatchedText: f.MatchedText,
 			FixHint:     f.FixHint,
+			Confidence:  f.Confidence,
+			Grade:       string(f.Grade()),
 		}
 	}
 
