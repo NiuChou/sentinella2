@@ -31,24 +31,6 @@ type Memory struct {
 	Text      string      `yaml:"memory"`
 }
 
-// MemoryEffectType classifies how a memory affects scanning.
-type MemoryEffectType string
-
-const (
-	EffectProtectionDeclared MemoryEffectType = "protection_declared"
-	EffectNotApplicable      MemoryEffectType = "not_applicable"
-	EffectSafePattern        MemoryEffectType = "safe_pattern"
-)
-
-// MemoryEffect is the structured interpretation of a Memory.
-type MemoryEffect struct {
-	Scope              MemoryScope
-	Effect             MemoryEffectType
-	AffectedScanners   []string // empty = all scanners
-	FilePatterns       []string // glob patterns for affected files
-	ConfidenceOverride float64  // 0.0 = full trust in declaration
-}
-
 // memorySchemaVersion is the current schema version for memories.yaml files.
 const memorySchemaVersion = "1.0"
 

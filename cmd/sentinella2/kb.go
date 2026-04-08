@@ -471,83 +471,63 @@ func sentinellaHomeDir() (string, error) {
 	return dir, nil
 }
 
-func kbStateDir() (string, error) {
+// resolveSubDir returns a subdirectory under ~/.sentinella2, creating it if needed.
+func resolveSubDir(parts ...string) (string, error) {
 	base, err := sentinellaHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, "kb")
+	dir := filepath.Join(append([]string{base}, parts...)...)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("failed to create kb directory: %w", err)
+		return "", fmt.Errorf("failed to create %s: %w", dir, err)
 	}
 	return dir, nil
 }
 
-func kbPendingDir() (string, error) {
-	base, err := sentinellaHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(base, "kb", "pending")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("failed to create pending directory: %w", err)
-	}
-	return dir, nil
-}
-
-func kbFeedbackDir() (string, error) {
-	base, err := sentinellaHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(base, "feedback")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("failed to create feedback directory: %w", err)
-	}
-	return dir, nil
-}
-
-func kbRegistryDir() (string, error) {
-	base, err := sentinellaHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(base, "registries")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("failed to create registries directory: %w", err)
-	}
-	return dir, nil
-}
+func kbStateDir() (string, error)    { return resolveSubDir("kb") }
+func kbPendingDir() (string, error)  { return resolveSubDir("kb", "pending") }
+func kbFeedbackDir() (string, error) { return resolveSubDir("feedback") }
+func kbRegistryDir() (string, error) { return resolveSubDir("registries") }
 
 // --- persistence helpers ---
 
-func loadFeedState(dir string) (feedStateFile, error) {
-	path := filepath.Join(dir, "state.yaml")
+// loadYAML reads a YAML file into T. Returns fallback on file-not-found.
+func loadYAML[T any](path string, fallback T) (T, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return feedStateFile{SchemaVersion: "1.0", Kind: "feed_state"}, nil
+			return fallback, nil
 		}
-		return feedStateFile{}, fmt.Errorf("read state file: %w", err)
+		var zero T
+		return zero, fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
+	var v T
+	if err := yaml.Unmarshal(data, &v); err != nil {
+		var zero T
+		return zero, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	return v, nil
+}
 
-	var state feedStateFile
-	if err := yaml.Unmarshal(data, &state); err != nil {
-		return feedStateFile{}, fmt.Errorf("parse state file: %w", err)
+// saveYAML marshals v to YAML and writes it to path.
+func saveYAML(path string, v any) error {
+	data, err := yaml.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
 	}
-	return state, nil
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+func loadFeedState(dir string) (feedStateFile, error) {
+	return loadYAML(filepath.Join(dir, "state.yaml"),
+		feedStateFile{SchemaVersion: "1.0", Kind: "feed_state"})
 }
 
 func saveFeedState(dir string, state feedStateFile) error {
-	path := filepath.Join(dir, "state.yaml")
-	data, err := yaml.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("marshal state file: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write state file: %w", err)
-	}
-	return nil
+	return saveYAML(filepath.Join(dir, "state.yaml"), state)
 }
 
 // updateFeedTimestamp returns a new feedStateFile with the given feed's
@@ -598,18 +578,9 @@ type internalFeedEntry struct {
 }
 
 func loadPendingEntries(dir string) ([]internalPendingEntry, error) {
-	path := filepath.Join(dir, "pending.yaml")
-	data, err := os.ReadFile(path)
+	pf, err := loadYAML(filepath.Join(dir, "pending.yaml"), pendingFile{})
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read pending file: %w", err)
-	}
-
-	var pf pendingFile
-	if err := yaml.Unmarshal(data, &pf); err != nil {
-		return nil, fmt.Errorf("parse pending file: %w", err)
+		return nil, err
 	}
 
 	entries := make([]internalPendingEntry, len(pf.Entries))
@@ -644,21 +615,11 @@ func savePendingEntries(dir string, entries []internalPendingEntry) error {
 		}
 	}
 
-	pf := pendingFile{
+	return saveYAML(filepath.Join(dir, "pending.yaml"), pendingFile{
 		SchemaVersion: "1.0",
 		Kind:          "pending_entries",
 		Entries:       stored,
-	}
-
-	path := filepath.Join(dir, "pending.yaml")
-	data, err := yaml.Marshal(pf)
-	if err != nil {
-		return fmt.Errorf("marshal pending file: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write pending file: %w", err)
-	}
-	return nil
+	})
 }
 
 func clearPendingEntries(dir string) error {
@@ -670,38 +631,19 @@ func clearPendingEntries(dir string) error {
 }
 
 func loadRegisteredSources(dir string) ([]registeredSource, error) {
-	path := filepath.Join(dir, "sources.yaml")
-	data, err := os.ReadFile(path)
+	rf, err := loadYAML(filepath.Join(dir, "sources.yaml"), registryFile{})
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read sources file: %w", err)
-	}
-
-	var rf registryFile
-	if err := yaml.Unmarshal(data, &rf); err != nil {
-		return nil, fmt.Errorf("parse sources file: %w", err)
+		return nil, err
 	}
 	return rf.Sources, nil
 }
 
 func saveRegisteredSources(dir string, sources []registeredSource) error {
-	rf := registryFile{
+	return saveYAML(filepath.Join(dir, "sources.yaml"), registryFile{
 		SchemaVersion: "1.0",
 		Kind:          "registry",
 		Sources:       sources,
-	}
-
-	path := filepath.Join(dir, "sources.yaml")
-	data, err := yaml.Marshal(rf)
-	if err != nil {
-		return fmt.Errorf("marshal sources file: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write sources file: %w", err)
-	}
-	return nil
+	})
 }
 
 // parseDuration parses a human-friendly duration string with support for days.

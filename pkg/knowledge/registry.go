@@ -145,16 +145,6 @@ func (r *Registry) List() []RegistryEntry {
 	return out
 }
 
-// Enable activates a previously disabled knowledge source.
-func (r *Registry) Enable(name string) error {
-	return r.setEnabled(name, true)
-}
-
-// Disable deactivates a knowledge source without removing it.
-func (r *Registry) Disable(name string) error {
-	return r.setEnabled(name, false)
-}
-
 // Sources returns KnowledgeSource entries for enabled registries, suitable for
 // passing to a knowledge base Resolver.
 func (r *Registry) Sources() []KnowledgeSource {
@@ -188,39 +178,6 @@ func (r *Registry) save() error {
 	path := filepath.Join(r.dir, registryFileName)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("write registry file: %w", err)
-	}
-
-	return nil
-}
-
-// setEnabled toggles the enabled state for the named entry.
-func (r *Registry) setEnabled(name string, enabled bool) error {
-	idx := r.findIndex(name)
-	if idx < 0 {
-		action := "enable"
-		if !enabled {
-			action = "disable"
-		}
-		return fmt.Errorf("%s registry entry: name %q not found", action, name)
-	}
-
-	if r.entries[idx].Enabled == enabled {
-		return nil // already in desired state
-	}
-
-	// Replace with updated entry (immutable update).
-	updated := make([]RegistryEntry, len(r.entries))
-	copy(updated, r.entries)
-	updated[idx].Enabled = enabled
-	updated[idx].UpdatedAt = time.Now().UTC()
-	r.entries = updated
-
-	if err := r.save(); err != nil {
-		action := "enable"
-		if !enabled {
-			action = "disable"
-		}
-		return fmt.Errorf("%s registry entry: %w", action, err)
 	}
 
 	return nil
