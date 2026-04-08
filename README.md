@@ -10,6 +10,100 @@ Security audit engine with adaptive knowledge base. Born from 93 real-world vuln
 
 ---
 
+## Project Structure / 工程结构
+
+```
+sentinella2/
+├── cmd/
+│   ├── sentinella2/                  # CLI entry point / CLI 入口
+│   │   ├── main.go                   #   command dispatcher / 命令分发
+│   │   ├── commands.go               #   scan, audit, check-layers / 核心命令实现
+│   │   ├── kb.go                     #   kb subcommands / 知识库管理命令
+│   │   ├── kb_feedback.go            #   feedback mark/stats / 反馈标注命令
+│   │   ├── triage.go                 #   interactive labeling / 交互式标注
+│   │   ├── learn.go                  #   pattern mining CLI / 模式挖掘命令
+│   │   └── memory.go                 #   context memory CLI / 上下文记忆命令
+│   └── sentinella2-mcp/              # MCP Server / MCP 服务器
+│       ├── main.go
+│       ├── server.go
+│       ├── tools.go
+│       └── definitions.go
+│
+├── pkg/                              # Public Go API (importable) / 公共 Go API
+│   ├── scan/                         #   Core scan engine / 核心扫描引擎
+│   │   ├── scanner.go                #     Scanner interface, Finding, Options
+│   │   ├── rule_scanner.go           #     Tier 1 regex scanning + Memory/Calibration integration
+│   │   ├── defense_scanner.go        #     6-layer defense assessment
+│   │   ├── grading.go                #     Confidence grading (Confirmed/Likely/Suspect)
+│   │   ├── correlation.go            #     Cross-scanner correlation (boost/penalty)
+│   │   └── triage.go                 #     Guided labeling priority engine
+│   │
+│   ├── knowledge/                    #   Knowledge base + learning / 知识库 + 学习系统
+│   │   ├── types.go                  #     Pattern, Case, DefenseLayer, Severity, Lifecycle
+│   │   ├── knowledge.go              #     KnowledgeBase with indexes
+│   │   ├── loader.go                 #     LoadFromFS / LoadFromDir
+│   │   ├── resolver.go               #     Multi-source KB merging
+│   │   ├── feedback.go               #     FeedbackStore (append-only verdicts)
+│   │   ├── calibration.go            #     Bayesian CalibrationStore (Beta distribution)
+│   │   ├── state.go                  #     FindingState persistence (cross-run tracking)
+│   │   ├── memory.go                 #     Context Memory (3-level scope)
+│   │   ├── lifecycle.go              #     Rule maturity engine (experimental → stable)
+│   │   ├── miner.go                  #     FP pattern clustering + suggestions
+│   │   ├── stackdetect.go            #     Tech stack detection (12 frameworks)
+│   │   ├── tuner.go                  #     Feedback-driven pattern adjustment
+│   │   ├── synthesizer.go            #     LLM-powered pattern generation
+│   │   ├── feed.go                   #     Feed synchronization (NVD, GHSA)
+│   │   ├── updater.go                #     Knowledge base updates
+│   │   ├── registry.go               #     KB registry
+│   │   └── prompts.go                #     LLM prompt templates
+│   │
+│   ├── provider/                     #   LLM provider abstraction / LLM 提供者抽象
+│   │   ├── provider.go               #     Provider interface + Config
+│   │   ├── openai.go                 #     OpenAI-compatible (Claude/GPT/GLM/Ollama)
+│   │   └── noop.go                   #     No-op for scan-only mode
+│   │
+│   └── report/                       #   Output formatters / 输出格式化
+│       ├── reporter.go               #     Reporter interface
+│       ├── text.go                   #     Human-readable + confidence grading
+│       ├── json.go                   #     Machine-parseable + confidence/grade fields
+│       └── markdown.go               #     Documentation format + grade grouping
+│
+���── internal/                         # Private implementation / 内部实现
+│   ├���─ config/
+│   │   └── config.go                 #   .sentinella2.yaml loader + defaults
+│   └── matcher/
+│       ├── regex.go                  #   Thread-safe compiled regex cache
+│       └── glob.go                   #   Glob matching with **/ support
+│
+├── knowledge/                        # Embedded YAML KB (go:embed) / 嵌入式知识库
+│   ├── schema/                       #   YAML schema definitions
+│   ├── patterns/                     #   7 vulnerability pattern files (29 rules)
+│   ├── defense-layers/               #   6-layer defense-in-depth model
+│   ├── mappings/                     #   FreeBSD-SA + OWASP Top 10 mappings
+│   ├── cases/                        #   93 real-world vulnerability cases
+│   ├── prompts/                      #   LLM audit prompt templates
+│   └── priors/                       #   Built-in Bayesian priors from audit data
+│
+├── examples/                         # Integration examples / 集成示例
+│   ├── github-action.yaml
+│   ├── gitlab-ci.yaml
+│   ├── sentinella2.yaml              #   Example config
+│   ├── claude-code-hook.json
+│   ├── cursor-mcp.json
+│   └── vscode-mcp.json
+│
+├── hooks/                            # Git hooks / Git 钩子
+├── embedded.go                       # go:embed declaration
+├── go.mod                            # Single dep: gopkg.in/yaml.v3
+└── .sentinella2/                     # Per-project learning data (gitignored)
+    ├── state.json                    #   Finding lifecycle states
+    ├── calibration.json              #   Bayesian β(α,β) buckets
+    ├── memories.yaml                 #   User-declared context
+    └── feedback/                     #   Monthly verdict YAML files
+```
+
+---
+
 <a id="english"></a>
 
 # English
