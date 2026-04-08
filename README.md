@@ -68,8 +68,8 @@ sentinella2/
 │       ├── json.go                   #     Machine-parseable + confidence/grade fields
 │       └── markdown.go               #     Documentation format + grade grouping
 │
-���── internal/                         # Private implementation / 内部实现
-│   ├���─ config/
+├── internal/                         # Private implementation / 内部实现
+│   ├── config/
 │   │   └── config.go                 #   .sentinella2.yaml loader + defaults
 │   └── matcher/
 │       ├── regex.go                  #   Thread-safe compiled regex cache
