@@ -2,8 +2,11 @@ sentinella2-scan:
   stage: test
   image: golang:1.23-alpine
   before_script:
-    - wget -q https://github.com/perseworks/sentinella2/releases/latest/download/sentinella2-linux-amd64 -O /usr/local/bin/sentinella2
-    - chmod +x /usr/local/bin/sentinella2
+    - wget -q https://github.com/perseworks/sentinella2/releases/latest/download/sentinella2-linux-amd64 -O sentinella2
+    - wget -q https://github.com/perseworks/sentinella2/releases/latest/download/checksums.txt -O checksums.txt
+    - sha256sum --check --ignore-missing checksums.txt
+    - chmod +x sentinella2
+    - mv sentinella2 /usr/local/bin/sentinella2
   script:
     - sentinella2 scan . --format json > scan-results.json
     - >

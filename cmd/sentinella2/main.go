@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/perseworks/sentinella2/pkg/provider"
 	"github.com/perseworks/sentinella2/pkg/report"
@@ -81,7 +83,7 @@ func runAudit(args []string) error {
 	formatFlag := fs.String("format", "text", "output format: text, json, markdown")
 	providerFlag := fs.String("provider", "", "LLM provider: openai-compatible")
 	modelFlag := fs.String("model", "", "model name (e.g., claude-sonnet-4-20250514)")
-	apiKeyFlag := fs.String("api-key", "", "API key (prefer SENTINELLA2_API_KEY env var)")
+	apiKeyFileFlag := fs.String("api-key-file", "", "path to file containing API key (prefer SENTINELLA2_API_KEY env var)")
 	baseURLFlag := fs.String("base-url", "", "API base URL")
 
 	if err := fs.Parse(args); err != nil {
@@ -97,7 +99,10 @@ func runAudit(args []string) error {
 		return err
 	}
 
-	apiKey := resolveAPIKey(*apiKeyFlag)
+	apiKey, err := resolveAPIKey(*apiKeyFileFlag)
+	if err != nil {
+		return err
+	}
 
 	cfg := provider.Config{
 		Name:    *providerFlag,
@@ -132,19 +137,45 @@ func runCheckLayers(args []string) error {
 }
 
 func runInit() error {
-	fmt.Println("Initializing sentinella2 configuration...")
-	// TODO: Create .sentinella2.yaml config file in current directory.
-	fmt.Println("Created .sentinella2.yaml (default configuration)")
+	targetDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+	configPath := filepath.Join(targetDir, ".sentinella2.yaml")
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("%s already exists", configPath)
+	}
+	defaultConfig := `# sentinella2 configuration
+scan:
+  exclude: ["vendor/**", "node_modules/**"]
+
+# audit:
+#   provider: "openai-compatible"
+#   base_url: "http://localhost:11434/v1"
+#   model: "llama3"
+`
+	if err := os.WriteFile(configPath, []byte(defaultConfig), 0o600); err != nil {
+		return fmt.Errorf("creating config: %w", err)
+	}
+	fmt.Printf("Created %s\n", configPath)
 	return nil
 }
 
-// resolveAPIKey returns the API key from the flag, falling back to the
-// SENTINELLA2_API_KEY environment variable.
-func resolveAPIKey(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
+// resolveAPIKey returns the API key from the environment variable, falling
+// back to reading from a file. The key is never accepted as a CLI flag to
+// avoid exposing secrets in the process list.
+func resolveAPIKey(keyFilePath string) (string, error) {
+	if envKey := os.Getenv("SENTINELLA2_API_KEY"); envKey != "" {
+		return envKey, nil
 	}
-	return os.Getenv("SENTINELLA2_API_KEY")
+	if keyFilePath != "" {
+		data, err := os.ReadFile(keyFilePath)
+		if err != nil {
+			return "", fmt.Errorf("reading api-key-file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return "", nil // no key = noop provider
 }
 
 func printUsage() {

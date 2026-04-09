@@ -220,7 +220,7 @@ func runKBSynthesize(args []string) error {
 	sinceFlag := fs.String("since", "7d", "analyze entries since duration")
 	providerFlag := fs.String("provider", "", "LLM provider: openai-compatible")
 	modelFlag := fs.String("model", "", "model name")
-	apiKeyFlag := fs.String("api-key", "", "API key (prefer SENTINELLA2_API_KEY env var)")
+	apiKeyFileFlag := fs.String("api-key-file", "", "path to file containing API key (prefer SENTINELLA2_API_KEY env var)")
 	baseURLFlag := fs.String("base-url", "", "API base URL")
 
 	if err := fs.Parse(args); err != nil {
@@ -232,7 +232,10 @@ func runKBSynthesize(args []string) error {
 		return fmt.Errorf("invalid --since value: %w", err)
 	}
 
-	apiKey := resolveAPIKey(*apiKeyFlag)
+	apiKey, err := resolveAPIKey(*apiKeyFileFlag)
+	if err != nil {
+		return err
+	}
 
 	cfg := provider.Config{
 		Name:    *providerFlag,

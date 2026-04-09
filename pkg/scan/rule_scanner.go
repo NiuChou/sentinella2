@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -82,6 +83,11 @@ func (s *RuleScanner) Scan(ctx context.Context, targetDir string) (Result, error
 			if s.shouldSkipDir(path, absDir) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// Skip symlinks to prevent following them outside the scan root.
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 
@@ -316,15 +322,24 @@ func memorySkipsPattern(mems []knowledge.Memory, patternID string) bool {
 // readFileBounded reads a file up to maxFileSize bytes. Returns an error
 // if the file cannot be read or exceeds the size limit.
 func readFileBounded(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat %q: %w", path, err)
 	}
 	if info.Size() > maxFileSize {
 		return nil, fmt.Errorf("file %q exceeds max size (%d bytes)", path, maxFileSize)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("skipping symlink %q", path)
+	}
 
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, maxFileSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading %q: %w", path, err)
 	}

@@ -171,7 +171,7 @@ func (ms *MemoryStore) Remove(index int) error {
 // directories if they do not exist.
 func (ms *MemoryStore) Save() error {
 	dir := filepath.Dir(ms.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create memory store directory %s: %w", dir, err)
 	}
 
@@ -181,7 +181,7 @@ func (ms *MemoryStore) Save() error {
 		return fmt.Errorf("marshal memory store: %w", err)
 	}
 
-	if err := os.WriteFile(ms.path, data, 0o644); err != nil {
+	if err := os.WriteFile(ms.path, data, 0o600); err != nil {
 		return fmt.Errorf("write memory store %s: %w", ms.path, err)
 	}
 	return nil

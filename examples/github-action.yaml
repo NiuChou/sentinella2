@@ -8,6 +8,8 @@ jobs:
       - name: Install sentinella2
         run: |
           curl -sSL https://github.com/perseworks/sentinella2/releases/latest/download/sentinella2-linux-amd64 -o sentinella2
+          curl -sSL https://github.com/perseworks/sentinella2/releases/latest/download/checksums.txt -o checksums.txt
+          sha256sum --check --ignore-missing checksums.txt
           chmod +x sentinella2
           sudo mv sentinella2 /usr/local/bin/
       - name: Run security scan

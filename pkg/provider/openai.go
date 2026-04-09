@@ -30,6 +30,20 @@ func newOpenAIProvider(cfg Config) (*OpenAIProvider, error) {
 		return nil, fmt.Errorf("api_key is required for openai-compatible provider")
 	}
 
+	// Warn about non-HTTPS for non-localhost endpoints
+	if !strings.HasPrefix(cfg.BaseURL, "https://") {
+		host := strings.TrimPrefix(strings.TrimPrefix(cfg.BaseURL, "http://"), "https://")
+		if idx := strings.IndexByte(host, ':'); idx > 0 {
+			host = host[:idx]
+		}
+		if idx := strings.IndexByte(host, '/'); idx > 0 {
+			host = host[:idx]
+		}
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return nil, fmt.Errorf("base_url must use HTTPS for non-localhost endpoints (got %q); use http:// only for local development", cfg.BaseURL)
+		}
+	}
+
 	client := &http.Client{
 		Timeout: 120 * time.Second,
 	}
@@ -82,13 +96,17 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body []byte) (string, er
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB max
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("LLM API returned status %d: %s", resp.StatusCode, string(respBody))
+		truncated := string(respBody)
+		if len(truncated) > 200 {
+			truncated = truncated[:200] + "...(truncated)"
+		}
+		return "", fmt.Errorf("LLM API returned status %d: %s", resp.StatusCode, truncated)
 	}
 
 	content, err := extractContent(respBody)

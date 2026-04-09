@@ -100,7 +100,7 @@ func OpenCalibrationStore(path string, priorsFS fs.FS) (*CalibrationStore, error
 		return nil, fmt.Errorf("open calibration store: path must not be empty")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("open calibration store: create directory: %w", err)
 	}
 
@@ -442,7 +442,7 @@ func marshalAndWriteCalibration(path string, data calibrationFile) error {
 	}
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -667,7 +667,7 @@ func SharedCalibrationDir() (string, error) {
 		return "", fmt.Errorf("shared calibration dir: %w", err)
 	}
 	dir := filepath.Join(home, ".sentinella2", "calibration")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("shared calibration dir: create: %w", err)
 	}
 	return dir, nil
@@ -754,7 +754,7 @@ func (cs *CalibrationStore) ExportForStack(stack TechStack) error {
 	}
 
 	path := filepath.Join(dir, stack.ID+".json")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("export for stack %s: write: %w", stack.ID, err)
 	}
 

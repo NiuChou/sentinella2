@@ -50,7 +50,7 @@ func OpenRegistry(dir string) (*Registry, error) {
 		return nil, fmt.Errorf("open registry: directory path must not be empty")
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("open registry: create directory: %w", err)
 	}
 
@@ -176,7 +176,7 @@ func (r *Registry) save() error {
 	}
 
 	path := filepath.Join(r.dir, registryFileName)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write registry file: %w", err)
 	}
 

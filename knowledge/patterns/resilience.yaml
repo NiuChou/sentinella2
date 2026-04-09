@@ -267,7 +267,7 @@ patterns:
           context: "**/*.ts — Background tasks, event listeners, connection pools"
         python:
           pattern: 'threading\.Thread\(|asyncio\.create_task\(|pool\.submit\(|Thread\(target='
-          negative_parameter: 'daemon=True|\.join\(\)|\.cancel\(\)|shutdown\(wait=|atexit\.register'
+          negative_pattern: 'daemon=True|\.join\(\)|\.cancel\(\)|shutdown\(wait=|atexit\.register'
           context: "**/*.py — Background threads, async tasks, resource pools"
       false_positive_hints:
         - "Goroutines with proper context cancellation and done channels"

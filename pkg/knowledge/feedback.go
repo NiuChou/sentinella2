@@ -85,7 +85,7 @@ func OpenFeedbackStore(dir string) (*FeedbackStore, error) {
 		return nil, fmt.Errorf("open feedback store: directory path must not be empty")
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("open feedback store: create directory: %w", err)
 	}
 
@@ -297,7 +297,7 @@ func (fs *FeedbackStore) appendToDisk(entry FeedbackEntry) error {
 		return fmt.Errorf("marshal feedback file %s: %w", month, err)
 	}
 
-	if err := os.WriteFile(path, out, 0o644); err != nil {
+	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return fmt.Errorf("write feedback file %s: %w", month, err)
 	}
 	return nil

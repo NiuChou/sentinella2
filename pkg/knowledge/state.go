@@ -60,7 +60,7 @@ func OpenStateStore(path string) (*StateStore, error) {
 		return nil, fmt.Errorf("open state store: path must not be empty")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("open state store: create directory: %w", err)
 	}
 
@@ -180,7 +180,7 @@ func marshalAndWrite(path string, data findingStateFile) error {
 
 	// Write to a sibling temp file then rename for atomicity.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

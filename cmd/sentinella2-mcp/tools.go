@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,12 +18,42 @@ import (
 // scanTimeout is the maximum duration for a single scan operation.
 const scanTimeout = 5 * time.Minute
 
+// sanitizeScanPath validates and cleans a path argument from an MCP client.
+// It rejects paths containing ".." after cleaning and absolute paths that
+// resolve outside the current working directory.
+func sanitizeScanPath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolving path: %w", err)
+	}
+	if strings.Contains(cleaned, "..") {
+		return "", fmt.Errorf("path traversal not allowed: %q", path)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getting working directory: %w", err)
+	}
+	cwdAbs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolving working directory: %w", err)
+	}
+	if !strings.HasPrefix(abs, cwdAbs+string(filepath.Separator)) && abs != cwdAbs {
+		return "", fmt.Errorf("path %q is outside the working directory", path)
+	}
+	return abs, nil
+}
+
 // executeScan runs the Tier 1 deterministic security scanner on the
 // specified path and returns the formatted results.
 func (s *MCPServer) executeScan(args map[string]interface{}) (string, error) {
-	path, err := requireStringArg(args, "path")
+	rawPath, err := requireStringArg(args, "path")
 	if err != nil {
 		return "", err
+	}
+	path, err := sanitizeScanPath(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
 	}
 
 	format := optionalStringArg(args, "format", "text")
@@ -54,9 +86,13 @@ func (s *MCPServer) executeScan(args map[string]interface{}) (string, error) {
 // executeCheckLayers runs the 6-layer defense-in-depth assessment
 // and returns the formatted results.
 func (s *MCPServer) executeCheckLayers(args map[string]interface{}) (string, error) {
-	path, err := requireStringArg(args, "path")
+	rawPath, err := requireStringArg(args, "path")
 	if err != nil {
 		return "", err
+	}
+	path, err := sanitizeScanPath(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
 	}
 
 	format := optionalStringArg(args, "format", "text")

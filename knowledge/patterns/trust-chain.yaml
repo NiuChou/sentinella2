@@ -24,11 +24,11 @@ patterns:
       tier: 3
       rules:
         go:
-          pattern: '(oidc\.NewProvider|oidcDiscoveryURL|issuerURL).*\n.*(?:oidc\.Config|tokenIssuer|ValidIssuer)'
+          pattern: '(?s)(oidc\.NewProvider|oidcDiscoveryURL|issuerURL).*\n.*(?:oidc\.Config|tokenIssuer|ValidIssuer)'
           negative_pattern: 'issuerURL\s*==\s*tokenConfig\.Issuer|validateIssuerMatch\('
           context: "**/*.go"
         typescript:
-          pattern: '(openid-client|jose|jsonwebtoken).*issuer.*\n.*(?:discovery|well-known)'
+          pattern: '(?s)(openid-client|jose|jsonwebtoken).*issuer.*\n.*(?:discovery|well-known)'
           negative_pattern: 'issuer\s*===\s*discoveryIssuer|verifyIssuerMatch\('
           context: "**/*.ts"
       false_positive_hints:
