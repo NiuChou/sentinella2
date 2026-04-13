@@ -333,3 +333,147 @@ patterns:
           startWorker(controller.signal);
           // To stop: controller.abort();
     cases: ["M-goroutine"]
+
+  - id: "resilience/missing-retry-after"
+    name: "429 Response Without Retry-After Header"
+    description: "Rate limit response (429 Too Many Requests) does not include a Retry-After header, leaving clients unable to back off correctly"
+    severity: MEDIUM
+    owasp: ["A04"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify HTTP handlers or middleware that return 429 Too Many Requests
+        status codes without setting a Retry-After header. Without this header,
+        clients cannot determine when to retry, leading to thundering herd
+        retries, wasted bandwidth, and degraded user experience. Well-behaved
+        rate limit responses must include Retry-After so clients can implement
+        correct exponential backoff.
+      tier: 1
+      rules:
+        go:
+          pattern: 'StatusTooManyRequests|status\(429\)|WriteHeader\(429\)|AbortWithStatus.*429|StatusCode\s*=\s*429'
+          negative_pattern: 'Retry-After|retry.?after|RetryAfter|Header\(\)\.Set\(.*[Rr]etry'
+          context: "**/*.go -- Rate limit middleware, HTTP handlers returning 429"
+        typescript:
+          pattern: 'status\(429\)|\.statusCode\s*=\s*429|res\.sendStatus\(429\)|statusCode:\s*429'
+          negative_pattern: 'retry-after|Retry-After|retryAfter|setHeader.*[Rr]etry|headers.*retry'
+          context: "**/*.ts -- Express/Koa/Fastify rate limit handlers"
+        python:
+          pattern: 'status_code\s*=\s*429|HttpResponse.*429|Response\(.*429|abort\(429\)|TOO_MANY_REQUESTS'
+          negative_pattern: 'Retry-After|retry.after|retry_after|headers\[.*retry'
+          context: "**/*.py -- Django/Flask/FastAPI rate limit handlers"
+      false_positive_hints:
+        - "Rate limit libraries (express-rate-limit, slowapi) that set Retry-After automatically"
+        - "429 status codes in test assertions or mock responses"
+        - "Error code constants defined for documentation purposes"
+    fix:
+      abstract: >
+        Always include a Retry-After header when returning 429 Too Many
+        Requests. The value should indicate how many seconds the client
+        must wait before retrying. Derive this from the rate limiter's
+        internal state (remaining window time or next available slot).
+      templates:
+        go: |
+          // Before: 429 without Retry-After
+          // c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limited"})
+
+          // After: include Retry-After
+          retryAfter := limiter.Reserve().Delay().Seconds()
+          c.Header("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+          c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+              "error":       "rate limit exceeded",
+              "retry_after": retryAfter,
+          })
+        typescript: |
+          // Before: 429 without Retry-After
+          // res.status(429).json({ error: 'rate limited' });
+
+          // After: include Retry-After
+          const retryAfter = Math.ceil(limiter.msBeforeNext / 1000);
+          res.set('Retry-After', String(retryAfter));
+          res.status(429).json({
+            error: 'Rate limit exceeded',
+            retryAfter,
+          });
+    cases: []
+
+  - id: "resilience/rate-limit-blocks-refresh"
+    name: "Rate Limit Covers Token Refresh Endpoint"
+    description: "Rate limiting applies to authentication refresh endpoints, causing cascading auth failures when users hit the rate limit"
+    severity: HIGH
+    owasp: ["A04"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify rate limit middleware or configuration that applies globally
+        or to auth routes without explicitly excluding the token refresh
+        endpoint (/auth/refresh, /token/refresh, /api/refresh). When a
+        rate-limited user's access token expires, the refresh request is
+        also rate-limited, making it impossible to obtain a new token.
+        The user is locked out until the rate limit window resets, even
+        though they have a valid refresh token.
+      tier: 2
+      rules:
+        go:
+          pattern: 'r\.Use\(.*[Rr]ate[Ll]imit|middleware\.[Rr]ate[Ll]imit|limiter\.Handler|tollbooth\.LimitHandler'
+          negative_pattern: 'refresh.*[Ee]xclude|[Ee]xclude.*refresh|SkipPaths.*refresh|auth/refresh|token/refresh'
+          context: "**/*.go -- Router setup, middleware registration"
+        typescript:
+          pattern: 'app\.use\(.*rateLimit|router\.use\(.*limiter|expressRateLimit|rateLimiter\('
+          negative_pattern: 'skip.*refresh|exclude.*refresh|whitelist.*refresh|auth/refresh|token/refresh|skipPaths'
+          context: "**/*.ts -- Express/Koa middleware setup"
+        python:
+          pattern: '@limiter\.limit|Throttle|RateLimitMiddleware|slowapi|flask_limiter'
+          negative_pattern: 'exempt.*refresh|skip.*refresh|exclude.*refresh|auth/refresh|token/refresh|decorators.*exempt'
+          context: "**/*.py -- Django/Flask/FastAPI rate limit setup"
+        yaml:
+          pattern: 'rate.?limit|requests.?per|max.?requests'
+          negative_pattern: 'exclud.*refresh|skip.*refresh|exempt.*refresh|whitelist.*refresh'
+          context: "**/*.yaml -- Gateway/proxy rate limit config files"
+      false_positive_hints:
+        - "Rate limit middleware applied only to specific non-auth routes"
+        - "Token refresh endpoints with their own separate (higher) rate limit"
+        - "API gateways where refresh exclusion is configured externally"
+    fix:
+      abstract: >
+        Exclude authentication refresh endpoints from global rate limiting.
+        The refresh endpoint must always be reachable so that users with
+        expired access tokens can obtain new ones. Apply a separate,
+        more generous rate limit to refresh endpoints if abuse prevention
+        is needed.
+      templates:
+        go: |
+          // Exclude refresh from global rate limit
+          limiter := ratelimit.New(cfg.GlobalRateLimit)
+
+          r.Use(func(c *gin.Context) {
+              // Skip rate limiting for token refresh
+              if c.Request.URL.Path == "/auth/refresh" {
+                  c.Next()
+                  return
+              }
+              limiter(c)
+          })
+
+          // Or apply a separate, higher limit to refresh
+          refreshLimiter := ratelimit.New(ratelimit.Config{
+              RequestsPerMinute: 30, // Higher than global
+          })
+          r.POST("/auth/refresh", refreshLimiter, handleRefresh)
+        typescript: |
+          // Exclude refresh from global rate limit
+          const globalLimiter = rateLimit({
+            windowMs: 60_000,
+            max: 60,
+            skip: (req) => req.path === '/auth/refresh',
+          });
+
+          // Separate limit for refresh endpoint
+          const refreshLimiter = rateLimit({
+            windowMs: 60_000,
+            max: 30,
+          });
+
+          app.use(globalLimiter);
+          app.post('/auth/refresh', refreshLimiter, handleRefresh);
+    cases: []

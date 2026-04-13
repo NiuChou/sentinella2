@@ -124,6 +124,29 @@ func buildIndexes(patterns []Pattern, cases []Case) (
 	return patternIndex, casesByPattern, patternsBySev
 }
 
+// NewKnowledgeBaseForTest constructs a KnowledgeBase from the given slices.
+// Intended for use in tests outside this package. Production code should use
+// LoadFromFS or the resolver.
+func NewKnowledgeBaseForTest(
+	patterns []Pattern,
+	cases []Case,
+	layers []DefenseLayer,
+	sas []FreeBSDSA,
+	owasp []OWASPCategory,
+) KnowledgeBase {
+	pidx, cbp, pbs := buildIndexes(patterns, cases)
+	return KnowledgeBase{
+		patterns:        copySlice(patterns),
+		cases:           copySlice(cases),
+		defenseLayers:   copySlice(layers),
+		freebsdSAs:      copySlice(sas),
+		owaspCategories: copySlice(owasp),
+		patternIndex:    pidx,
+		casesByPattern:  cbp,
+		patternsBySev:   pbs,
+	}
+}
+
 // copySlice returns a shallow copy of a slice so callers cannot mutate the
 // internal state of KnowledgeBase.
 func copySlice[T any](src []T) []T {

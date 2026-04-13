@@ -1,0 +1,349 @@
+# Cross-Platform Architecture Vulnerability Patterns
+# Category: cross-platform
+# Detects systemic issues that emerge when multiple platforms share architecture
+# patterns but implement them independently.
+# Source: perseworks 4-platform post-mortem (PLM/Altus/Bee/Admin, 49 fixes)
+
+schema_version: "1.0"
+kind: PatternFile
+category: cross-platform
+
+patterns:
+  - id: "cross-platform/auth-client-duplication"
+    name: "Duplicated Auth Client Implementation"
+    description: "Multiple platform directories independently implement HTTP auth client with 401/refresh handling, enabling same bug to replicate across platforms"
+    severity: HIGH
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify multiple independent implementations of authenticated HTTP
+        clients (fetch wrappers, axios interceptors, API clients) across
+        platform directories that each handle 401 responses and token refresh
+        independently. When the same auth pattern is copy-pasted into
+        separate codebases, a single bug (e.g., catch-not-re-throw) is
+        replicated N times and must be found and fixed N times.
+      tier: 2
+      rules:
+        typescript:
+          pattern: 'interceptors\.response\.use\([^)]*401|fetch\(.*authorization.*401|createAuthClient|refreshToken.*catch'
+          negative_pattern: 'from\s+[''"]@shared/|from\s+[''"]shared/|from\s+[''"]@core/auth|import.*createAuthClient\s+from'
+          context: "**/*.ts — API client modules, fetch wrappers, axios instances"
+        go:
+          pattern: 'func\s+\w*[Aa]uth\w*[Cc]lient|RoundTrip.*401|refreshToken|func.*createHTTPClient'
+          negative_pattern: 'import.*shared/auth|pkg/auth|auth\.NewClient\('
+          context: "**/*.go — HTTP client constructors, transport wrappers"
+        python:
+          pattern: 'class\s+\w*Auth\w*Client|session\.hooks.*401|def\s+refresh_token'
+          negative_pattern: 'from\s+shared\.|from\s+core\.auth|import\s+auth_client'
+          context: "**/*.py — HTTP client classes, session factories"
+      false_positive_hints:
+        - "Test mocks that simulate auth clients"
+        - "SDK wrappers for external third-party APIs (not internal auth)"
+        - "Single-platform projects with only one API client"
+        - "Admin auth client vs user auth client that are intentionally different (distinct permission models)"
+        - "Microservice repos where each service has its own repo — cross-repo duplication is not detectable"
+      cross_file:
+        # Tightened: must include 401 or refresh context, not just any interceptor
+        collect: 'interceptors\.response\.use\([^)]*401|createAuthClient|func\s+\w*[Aa]uth\w*[Cc]lient|401.*refresh|class\s+\w*Auth\w*Client'
+        collect_from: ["**/*.ts", "**/*.go", "**/*.py"]
+        assert: "unique_count > 1"
+        assert_type: "duplication"
+        group_by: "top_directory"
+    fix:
+      abstract: >
+        Extract a shared auth client library used by all platforms. The
+        shared library owns 401 handling, token refresh, retry logic, and
+        login redirect. Individual platforms import and configure it but
+        never implement auth flow independently.
+      templates:
+        typescript: |
+          // shared/pkg/web-auth/createAuthClient.ts
+          // Single source of truth for all platforms
+          export function createAuthClient(config: AuthClientConfig) {
+            const instance = axios.create({ baseURL: config.baseURL });
+
+            instance.interceptors.response.use(
+              (response) => response,
+              async (error) => {
+                if (error.response?.status === 401) {
+                  try {
+                    await refreshToken();
+                    return instance(error.config);
+                  } catch (refreshError) {
+                    redirectToLogin();
+                    throw refreshError; // Always re-throw
+                  }
+                }
+                throw error; // Always re-throw non-401 errors
+              }
+            );
+
+            return instance;
+          }
+
+          // Each platform: import, don't reimplement
+          // import { createAuthClient } from '@shared/web-auth';
+          // export const apiClient = createAuthClient({ baseURL: '/api' });
+    cases: ["H-CP1"]
+
+  - id: "cross-platform/rate-limit-config-fragmentation"
+    name: "Fragmented Rate Limit Configuration"
+    description: "Multiple gateway/service instances define rate limit configs independently instead of sharing a single source of truth"
+    severity: MEDIUM
+    status: experimental
+    confidence_weight: 0.5
+    owasp: ["A04"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify multiple rate limit configuration definitions across
+        different services or gateway instances that are not derived from
+        a shared configuration source. Fragmented configs drift apart over
+        time, leading to inconsistent protection levels: one gateway may
+        exclude /auth/refresh from rate limiting while another does not,
+        causing a cascading auth failure when the refresh endpoint is
+        rate-limited.
+
+        NOTE: This pattern has high false-positive risk. Different services
+        legitimately have different rate limit configs (API gateway vs
+        internal microservice). This is most accurate in monorepo
+        architectures where multiple gateways of the same type should share
+        configuration. Marked as experimental — will not block CI.
+      tier: 2
+      rules:
+        go:
+          pattern: 'RateLimit\s*[:=]|rateLimitConfig|MaxRequestsPerSecond|requestsPerMinute|ExcludedPaths.*rate'
+          negative_pattern: 'shared\.RateLimitConfig|common\.RateLimit|config\.LoadShared|rateLimitConfigPath'
+          context: "**/*.go — Config structs, middleware setup, gateway initialization"
+        typescript:
+          pattern: 'rateLimit\s*[:=]|rateLimitConfig|maxRequests\s*[:=]|windowMs\s*[:=]|excludePaths.*rate'
+          negative_pattern: 'shared/rate-limit|@shared/config|common/rate-limit|RATE_LIMIT_CONFIG_PATH'
+          context: "**/*.ts — Config files, middleware setup, app initialization"
+        yaml:
+          pattern: 'rate.?limit|max.?requests|window.?ms|requests.?per|excluded.?paths'
+          negative_pattern: 'source:|config.?source|shared.?config|import'
+          context: "**/*.yaml — Rate limit configuration files"
+      false_positive_hints:
+        - "Rate limit configs in test fixtures"
+        - "Client-side rate limit configurations (different concern)"
+        - "Single-service projects with only one rate limit config"
+        - "Different service types (API gateway vs internal service) that legitimately need different limits"
+        - "Services with different SLAs or customer tiers requiring distinct rate limit configs"
+      cross_file:
+        collect: 'RateLimit\s*[:=]|rateLimitConfig|rate.?limit.*[:=]'
+        collect_from: ["**/*.go", "**/*.ts", "**/*.yaml"]
+        assert: "unique_count > 1"
+        assert_type: "duplication"
+        group_by: "top_directory"
+    fix:
+      abstract: >
+        Centralize rate limit configuration into a single shared file or
+        service. All gateways and services read from this shared source.
+        Include excluded_paths in the shared config so rate limit exclusions
+        are consistent across all entry points.
+      templates:
+        yaml: |
+          # config/shared/rate-limits.yaml — single source of truth
+          rate_limits:
+            global:
+              requests_per_second: 100
+              burst: 200
+            per_user:
+              requests_per_minute: 60
+            excluded_paths:
+              - /health
+              - /metrics
+              - /auth/refresh  # CRITICAL: refresh must be excluded from rate limiting
+        go: |
+          // Each gateway loads the shared config — no local overrides
+          cfg, err := shared.LoadRateLimitConfig("config/shared/rate-limits.yaml")
+          if err != nil {
+              log.Fatal("failed to load shared rate limit config", zap.Error(err))
+          }
+          r.Use(ratelimit.New(cfg))
+    cases: ["H-CP2"]
+
+  - id: "cross-platform/cookie-jwt-ttl-desync"
+    name: "Cookie TTL and JWT TTL Desynchronization"
+    description: "Browser cookie maxAge and backend JWT expiry are set independently, creating a window where one expires before the other"
+    severity: HIGH
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify separate definitions of cookie TTL (maxAge, expires) and
+        JWT TTL (expiresIn, exp) that are not derived from a shared constant.
+        When cookie maxAge < JWT expiry, the browser deletes the cookie while
+        the JWT is still valid — the user loses their session but the token
+        can still be replayed. When cookie maxAge > JWT expiry, the browser
+        sends an expired JWT, triggering 401 errors that the user cannot
+        resolve without clearing cookies manually.
+
+        NOTE: This pattern requires Tier 3 (LLM) analysis for accurate
+        detection. Static regex cannot distinguish between access token
+        TTL, refresh token TTL, CSRF cookie TTL, or preference cookie TTL.
+        Values in different units (ms vs seconds vs string like '15m')
+        are semantically equivalent but appear different to regex.
+        Tier 1 rules flag potential locations; Tier 3 LLM determines
+        whether the flagged values refer to the same token.
+      tier: 3
+      rules:
+        typescript:
+          pattern: 'maxAge\s*[:=]|cookie.*expire|expiresIn\s*[:=]|jwt\.sign.*expire|SetCookie.*Max-Age'
+          negative_pattern: 'TOKEN_TTL.*maxAge|TOKEN_TTL.*expiresIn|shared.*TTL|COOKIE_MAX_AGE.*JWT_EXPIRY'
+          context: "**/*.ts — Cookie setting, JWT signing, auth config"
+        go:
+          pattern: 'MaxAge\s*[:=]|cookie\.MaxAge|Expires\s*[:=].*time\.|jwt\.\w+Claims.*Expir|expiresAt.*time\.'
+          negative_pattern: 'tokenTTL.*MaxAge|tokenTTL.*ExpiresAt|shared\.TokenTTL|config\.TokenLifetime'
+          context: "**/*.go — Cookie setting, JWT claims, token generation"
+        python:
+          pattern: 'max_age\s*=|expires\s*=.*timedelta|access_token_expires|jwt\.encode.*exp'
+          negative_pattern: 'TOKEN_TTL.*max_age|TOKEN_TTL.*expires|settings\.TOKEN_LIFETIME'
+          context: "**/*.py — Cookie setting, JWT generation, auth config"
+      false_positive_hints:
+        - "Refresh token TTLs that are intentionally different from access token TTLs"
+        - "Session cookies (no maxAge) that rely on browser session lifetime"
+        - "Cookie maxAge and JWT expiry that reference the same constant"
+        - "CSRF cookie TTL is a different concern from auth token TTL"
+        - "Values in different units (ms vs seconds vs string) that are semantically equivalent"
+      # No cross_file — removed because static value comparison cannot
+      # handle unit conversion (900000ms == 900s == '15m') or distinguish
+      # which cookie maxAge pairs with which JWT expiresIn. Requires Tier 3
+      # LLM semantic analysis.
+    fix:
+      abstract: >
+        Define a single TOKEN_TTL constant that both the cookie maxAge and
+        JWT expiresIn reference. The cookie must expire at the same time as
+        or slightly after the JWT to ensure the browser never sends an
+        expired JWT and never deletes a valid session prematurely.
+      templates:
+        typescript: |
+          // shared/constants/auth.ts — single TTL definition
+          export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
+
+          // Backend: JWT signing
+          jwt.sign(payload, secret, {
+            expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          });
+
+          // Backend: cookie setting — same constant
+          res.cookie('access_token', token, {
+            maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000, // ms
+            httpOnly: true,
+            secure: true,
+            sameSite: 'strict',
+          });
+        go: |
+          // shared/auth/constants.go
+          const AccessTokenTTL = 15 * time.Minute
+
+          // JWT claims
+          claims := jwt.MapClaims{
+              "exp": time.Now().Add(AccessTokenTTL).Unix(),
+          }
+
+          // Cookie — same constant
+          http.SetCookie(w, &http.Cookie{
+              Name:     "access_token",
+              Value:    token,
+              MaxAge:   int(AccessTokenTTL.Seconds()),
+              HttpOnly: true,
+              Secure:   true,
+              SameSite: http.SameSiteStrictMode,
+          })
+    cases: ["H-CP3"]
+
+  - id: "cross-platform/incomplete-refresh-chain"
+    name: "Incomplete Token Refresh Error Chain"
+    description: "401 response handler refreshes token but does not handle refresh failure (no re-throw, no login redirect)"
+    severity: CRITICAL
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify 401 response interceptors or error handlers that attempt
+        token refresh but have incomplete error chains: catch blocks that
+        swallow errors without re-throwing, refresh failures that do not
+        redirect to login, or retry logic that silently drops the original
+        request on refresh failure. The complete chain must be:
+        401 → refresh → retry → (on refresh failure) → redirect to login.
+        Any missing link leaves the user in an unrecoverable broken state.
+      tier: 2
+      rules:
+        typescript:
+          pattern: 'catch\s*\([^)]*\)\s*\{[^}]*(?:console\.\w+|log)[^}]*\}(?!\s*throw)|\.catch\(\s*(?:err|e|error)\s*=>\s*\{[^}]*\}(?!\s*\.then)|401[^}]*refresh[^}]*catch[^}]*(?!throw|redirect|login|window\.location)'
+          negative_pattern: 'catch.*\{[^}]*throw|catch.*\{[^}]*redirect.*login|catch.*\{[^}]*window\.location|catch.*\{[^}]*router\.push.*login'
+          context: "**/*.ts — Axios interceptors, fetch wrappers, API client error handlers"
+        go:
+          pattern: 'if\s+err\s*!=\s*nil\s*\{[^}]*log\.\w+[^}]*\}(?!\s*return\s+err)|401[^}]*refresh[^}]*err[^}]*(?!return|redirect)'
+          negative_pattern: 'if\s+err\s*!=\s*nil\s*\{[^}]*return.*err|401.*refresh.*redirect|refreshErr.*return.*refreshErr'
+          context: "**/*.go — HTTP client error handling, token refresh logic"
+        python:
+          pattern: 'except.*:\s*\n\s*(?:logger?\.\w+|print)[^#]*(?!\n\s*raise)|401.*refresh.*except.*(?!raise|redirect)'
+          negative_pattern: 'except.*:\s*\n.*\n\s*raise|except.*:\s*\n.*redirect.*login'
+          context: "**/*.py — Request session hooks, auth client error handling"
+      false_positive_hints:
+        - "Error logging in non-auth contexts (generic HTTP error handlers)"
+        - "Background jobs that intentionally swallow auth errors and retry later"
+        - "SSR/server-side code where login redirect uses HTTP 302 instead of window.location"
+        - "Event-driven auth failure handling where an 'auth-failed' event is emitted and a global listener handles the redirect"
+        - "Native mobile apps where auth failure triggers a navigation stack reset instead of window.location"
+      cross_file:
+        collect: '401.*refresh|refresh.*401|interceptors.*401|catch.*refresh'
+        collect_from: ["**/*.ts", "**/*.go", "**/*.py"]
+        assert: "chain_has_all_of: refresh,throw_or_redirect"
+        assert_type: "completeness"
+        group_by: "top_directory"
+    fix:
+      abstract: >
+        Ensure every 401 handler follows the complete chain:
+        1. Detect 401 response
+        2. Attempt token refresh
+        3. On refresh success: retry original request
+        4. On refresh failure: MUST re-throw the error AND redirect to login
+        Never swallow errors in catch blocks. The catch block is the most
+        critical part — a silent catch leaves users in a broken state where
+        they see "authentication required" but cannot recover.
+      templates:
+        typescript: |
+          instance.interceptors.response.use(
+            (response) => response,
+            async (error) => {
+              const originalRequest = error.config;
+
+              if (error.response?.status === 401 && !originalRequest._retry) {
+                originalRequest._retry = true;
+
+                try {
+                  await refreshToken();
+                  return instance(originalRequest); // Retry
+                } catch (refreshError) {
+                  // CRITICAL: both re-throw AND redirect
+                  redirectToLogin();
+                  throw refreshError; // Never swallow
+                }
+              }
+
+              throw error; // Non-401 errors must also propagate
+            }
+          );
+        go: |
+          func (c *AuthClient) Do(req *http.Request) (*http.Response, error) {
+              resp, err := c.inner.Do(req)
+              if err != nil {
+                  return nil, fmt.Errorf("request failed: %w", err)
+              }
+
+              if resp.StatusCode == http.StatusUnauthorized {
+                  if refreshErr := c.refreshToken(req.Context()); refreshErr != nil {
+                      // CRITICAL: return the refresh error, never swallow
+                      return nil, fmt.Errorf("token refresh failed: %w", refreshErr)
+                  }
+                  // Retry with new token
+                  return c.inner.Do(req)
+              }
+
+              return resp, nil
+          }
+    cases: ["H-CP4"]

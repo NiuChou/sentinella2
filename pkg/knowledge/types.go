@@ -88,12 +88,37 @@ func (p Pattern) CanBlockCI() bool {
 }
 
 // Detection holds the detection strategy for a pattern, including per-language
-// regex rules and false-positive hints.
+// regex rules, false-positive hints, and optional cross-file analysis rules.
 type Detection struct {
 	Abstract           string              `yaml:"abstract"`
 	Tier               int                 `yaml:"tier"`
 	Rules              map[string]RuleSet  `yaml:"rules"`
 	FalsePositiveHints []string            `yaml:"false_positive_hints"`
+	CrossFile          *CrossFileRule      `yaml:"cross_file,omitempty"`
+}
+
+// CrossFileRule defines a cross-file analysis strategy that collects matches
+// across the codebase and applies relational assertions. Used by CrossFileScanner
+// (Tier 2) to detect systemic issues spanning multiple files or platforms.
+type CrossFileRule struct {
+	// Collect is the regex pattern to gather matches across files.
+	Collect string `yaml:"collect"`
+	// CollectFrom is the list of file globs to search in.
+	CollectFrom []string `yaml:"collect_from"`
+	// Assert is the condition to evaluate on grouped matches.
+	Assert string `yaml:"assert"`
+	// AssertType classifies the kind of cross-file check:
+	//   "duplication"   — flag when multiple groups have similar implementations
+	//   "consistency"   — flag when extracted values differ across groups
+	//   "completeness"  — flag when a required chain of patterns is incomplete
+	AssertType string `yaml:"assert_type"`
+	// GroupBy controls how matches are grouped. "top_directory" groups by
+	// the first path component; "none" treats all matches as one group.
+	GroupBy string `yaml:"group_by"`
+	// ValueExtract is an optional regex for the "consistency" assert type.
+	// The first capture group is used as the extracted value. If empty,
+	// a default regex extracting values after : or = is used.
+	ValueExtract string `yaml:"value_extract,omitempty"`
 }
 
 // RuleSet contains the regex patterns for detecting a vulnerability in a

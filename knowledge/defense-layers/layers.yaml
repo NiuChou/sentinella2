@@ -251,6 +251,38 @@ layers:
           pattern: "csrf|csrfToken|SameSite|xsrf"
           negative_pattern: "SameSite.*None|csrf.*disabled"
 
+      - id: "L4-05"
+        name: "Auth Client Consolidation"
+        description: "All platforms share a single auth client implementation instead of independent copies (requires Tier 2 cross-file scan; shows UNKNOWN in basic layer assessment)"
+        pattern_refs: ["cross-platform/auth-client-duplication"]
+        tier: 2
+        verification: >
+          Requires Tier 2 (cross-file) scanning to evaluate. In basic layer
+          assessments this check shows as UNKNOWN. To evaluate, run
+          `sentinella2 scan --tier 2`. Verify that authenticated HTTP clients
+          across all platform directories import from a shared auth library
+          rather than implementing 401 handling and token refresh independently.
+        detection:
+          files: ["**/*.ts", "**/*.go", "**/*.py"]
+          pattern: "from\\s+['\"]@shared/|from\\s+['\"]shared/|import.*shared/auth|pkg/auth\\.NewClient"
+          negative_pattern: "interceptors\\.response\\.use.*401.*refresh(?!.*@shared)"
+
+      - id: "L4-06"
+        name: "Token TTL Consistency"
+        description: "Cookie maxAge and JWT expiry are derived from the same constant (requires Tier 2 cross-file scan; shows UNKNOWN in basic layer assessment)"
+        pattern_refs: ["cross-platform/cookie-jwt-ttl-desync"]
+        tier: 2
+        verification: >
+          Requires Tier 2 (cross-file) scanning to evaluate. In basic layer
+          assessments this check shows as UNKNOWN. To evaluate, run
+          `sentinella2 scan --tier 2`. Verify that cookie maxAge and JWT
+          expiresIn values reference a single shared constant (e.g.,
+          ACCESS_TOKEN_TTL).
+        detection:
+          files: ["**/*.ts", "**/*.go", "**/*.py"]
+          pattern: "TOKEN_TTL|TokenTTL|tokenLifetime|ACCESS_TOKEN_EXPIRY"
+          negative_pattern: "maxAge\\s*[:=]\\s*\\d+(?!.*TOKEN_TTL)|expiresIn\\s*[:=]\\s*['\"]\\d+[mhd]['\"](?!.*TOKEN_TTL)"
+
   - id: data_protection
     name: "Layer 5: Data Protection"
     order: 5

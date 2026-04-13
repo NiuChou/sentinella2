@@ -391,3 +391,69 @@ patterns:
             return;
           }
     cases: ["H7"]
+
+  - id: "auth-flow/bypass-auth-client"
+    name: "Raw HTTP Call Bypassing Auth Client"
+    description: "Direct fetch/http call bypasses the project's centralized auth client, missing token injection, 401 handling, and refresh logic"
+    severity: HIGH
+    owasp: ["A07"]
+    freebsd_sa: []
+    detection:
+      abstract: >
+        Identify direct HTTP calls (fetch, axios.get, http.Get, requests.get)
+        in application code that bypass the project's centralized authenticated
+        HTTP client. Raw calls skip automatic token injection, 401 detection,
+        token refresh, and login redirect. This creates endpoints that silently
+        fail authentication or send unauthenticated requests to protected APIs.
+        The centralized auth client exists precisely to ensure every API call
+        goes through the full auth flow.
+      tier: 2
+      rules:
+        typescript:
+          pattern: 'fetch\(\s*[''"`]\/api|fetch\(\s*[''"`]http|axios\.\w+\(\s*[''"`]\/api|axios\.\w+\(\s*[''"`]http|new\s+XMLHttpRequest'
+          negative_pattern: 'apiClient\.|authClient\.|authenticatedFetch|createAuthClient|from\s+[''"].*api-client|from\s+[''"].*auth-client|from\s+[''"].*http-client'
+          context: "**/*.ts -- Page components, hooks, services (not the auth client itself)"
+        go:
+          pattern: 'http\.Get\(|http\.Post\(|http\.NewRequest\(|http\.DefaultClient|&http\.Client\{\}'
+          negative_pattern: 'authClient\.|apiClient\.|AuthenticatedClient|NewAuthClient|auth\.Client|RoundTripper'
+          context: "**/*.go -- Service handlers, API integrations (not the auth transport)"
+        python:
+          pattern: 'requests\.get\(|requests\.post\(|requests\.put\(|requests\.delete\(|urllib\.request|httpx\.get\(|httpx\.post\('
+          negative_pattern: 'api_client\.|auth_client\.|authenticated_session|AuthenticatedClient|from.*api_client|from.*auth_client'
+          context: "**/*.py -- Service modules, API integrations (not the auth client)"
+      false_positive_hints:
+        - "The auth client implementation file itself (it must use raw HTTP)"
+        - "External third-party API calls that use their own auth (Stripe, Twilio)"
+        - "Health check or public endpoint calls that do not require authentication"
+        - "Test files that mock HTTP calls"
+    fix:
+      abstract: >
+        Replace all raw HTTP calls to internal APIs with the project's
+        centralized auth client. The auth client automatically handles
+        token injection, 401 detection, token refresh, and login redirect.
+        Only the auth client itself and calls to external third-party
+        APIs should use raw HTTP.
+      templates:
+        typescript: |
+          // Before: raw fetch bypasses auth
+          // const resp = await fetch('/api/users');
+
+          // After: use the project's auth client
+          import { apiClient } from '@shared/api-client';
+          const resp = await apiClient.get('/api/users');
+          // apiClient automatically:
+          // 1. Injects Authorization header
+          // 2. Detects 401 responses
+          // 3. Refreshes token on 401
+          // 4. Redirects to login on refresh failure
+        go: |
+          // Before: raw http.Get bypasses auth
+          // resp, err := http.Get("http://internal-api/users")
+
+          // After: use the project's auth client
+          resp, err := authClient.Get(ctx, "/users")
+          // authClient automatically:
+          // 1. Sets Authorization header via RoundTripper
+          // 2. Handles 401 with token refresh
+          // 3. Returns clear error on auth failure
+    cases: []

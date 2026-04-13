@@ -472,3 +472,148 @@ func openCalibrationStoreForTest(t *testing.T) *knowledge.CalibrationStore {
 	return cs
 }
 
+// patternWithNeg returns a Pattern with positive and negative regex rules.
+func patternWithNeg(id, lang, pos, neg string) knowledge.Pattern {
+	return knowledge.Pattern{
+		ID:       id,
+		Name:     id,
+		Severity: knowledge.SeverityHigh,
+		Detection: knowledge.Detection{
+			Tier: 1,
+			Rules: map[string]knowledge.RuleSet{
+				lang: {Pattern: pos, NegativePattern: neg},
+			},
+		},
+	}
+}
+
+func TestNewRules_MissingRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	pat := patternWithNeg(
+		"resilience/missing-retry-after", "go",
+		`StatusTooManyRequests|status\(429\)|WriteHeader\(429\)|AbortWithStatus.*429`,
+		`Retry-After|retry.?after|RetryAfter|Header\(\)\.Set\(.*[Rr]etry`,
+	)
+	pat.Severity = knowledge.SeverityMedium
+
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{
+			name: "vulnerable: 429 without Retry-After",
+			content: `func rateLimitHandler(c *gin.Context) {
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limited"})
+			}`,
+			want: 1,
+		},
+		{
+			name: "mitigated: 429 with Retry-After header",
+			content: `func rateLimitHandler(c *gin.Context) {
+				c.Header("Retry-After", "60")
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limited"})
+			}`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestScanner()
+			findings := s.scanFile(context.Background(), "middleware.go", "go", []byte(tt.content), []knowledge.Pattern{pat})
+			if len(findings) != tt.want {
+				t.Errorf("got %d findings, want %d", len(findings), tt.want)
+			}
+		})
+	}
+}
+
+func TestNewRules_RateLimitBlocksRefresh(t *testing.T) {
+	t.Parallel()
+
+	pat := patternWithNeg(
+		"resilience/rate-limit-blocks-refresh", "go",
+		`r\.Use\(.*[Rr]ate[Ll]imit|middleware\.[Rr]ate[Ll]imit|limiter\.Handler|tollbooth\.LimitHandler`,
+		`refresh.*[Ee]xclude|[Ee]xclude.*refresh|SkipPaths.*refresh|auth/refresh|token/refresh`,
+	)
+
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{
+			name: "vulnerable: global rate limit without refresh exclusion",
+			content: `func setupRouter(r *gin.Engine) {
+				r.Use(middleware.RateLimit(60))
+				r.POST("/auth/login", handleLogin)
+				r.POST("/users", handleUsers)
+			}`,
+			want: 1,
+		},
+		{
+			name: "mitigated: rate limit excludes refresh",
+			content: `func setupRouter(r *gin.Engine) {
+				r.Use(middleware.RateLimit(60, ratelimit.ExcludePaths("/auth/refresh")))
+			}`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestScanner()
+			findings := s.scanFile(context.Background(), "router.go", "go", []byte(tt.content), []knowledge.Pattern{pat})
+			if len(findings) != tt.want {
+				t.Errorf("got %d findings, want %d", len(findings), tt.want)
+			}
+		})
+	}
+}
+
+func TestNewRules_BypassAuthClient(t *testing.T) {
+	t.Parallel()
+
+	pat := patternWithNeg(
+		"auth-flow/bypass-auth-client", "go",
+		`http\.Get\(|http\.Post\(|http\.NewRequest\(|http\.DefaultClient|&http\.Client\{\}`,
+		`authClient\.|apiClient\.|AuthenticatedClient|NewAuthClient|auth\.Client|RoundTripper`,
+	)
+
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{
+			name: "vulnerable: raw http.Get bypasses auth client",
+			content: `func getUsers() (*http.Response, error) {
+				return http.Get("http://internal-api/users")
+			}`,
+			want: 1,
+		},
+		{
+			name: "mitigated: uses auth client",
+			content: `func getUsers(authClient *auth.Client) (*http.Response, error) {
+				return authClient.Get(ctx, "/users")
+			}`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestScanner()
+			findings := s.scanFile(context.Background(), "service.go", "go", []byte(tt.content), []knowledge.Pattern{pat})
+			if len(findings) != tt.want {
+				t.Errorf("got %d findings, want %d", len(findings), tt.want)
+			}
+		})
+	}
+}
+

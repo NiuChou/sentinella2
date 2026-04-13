@@ -496,3 +496,92 @@ cases:
     lesson: >
       Error messages are information disclosure vectors — every detail in an
       error response is intelligence for an attacker mapping your system.
+
+  # --- Cross-Platform Post-mortem Cases (2026-04-12) ---
+
+  - id: "H-CP1"
+    title: "Four platforms independently implement auth client — same catch-not-rethrow bug replicated 3x"
+    severity: HIGH
+    pattern_ref: "cross-platform/auth-client-duplication"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/api/client.ts, plm-web/src/api/client.ts, bee-web/src/api/client.ts, admin-web/src/api/client.ts"
+    description: >
+      Four frontend platforms (PLM, Altus, Bee, Admin) each independently
+      implemented an authenticated API client with 401 handling and token
+      refresh. The same bug — catch block swallowing refresh errors without
+      re-throwing — was independently written in three of the four
+      implementations. Finding and fixing required auditing all four codebases.
+    fix_summary: >
+      Extract createAuthClient() into a shared web-auth package. All four
+      platforms import and configure the shared client. 401 handling, refresh
+      logic, and error propagation are implemented once and tested once.
+    lesson: >
+      Independent implementation of shared architecture patterns guarantees
+      independent replication of bugs. The cost of a shared library is paid
+      once; the cost of duplicated bugs is paid N times.
+
+  - id: "H-CP2"
+    title: "Three gateways have independent rate limit configs — refresh endpoint excluded in only one"
+    severity: HIGH
+    pattern_ref: "cross-platform/rate-limit-config-fragmentation"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/config/rate_limit.go, plm-gateway/config/rate_limit.go, bee-gateway/config/rate_limit.go"
+    description: >
+      Three backend gateways each define their own rate limit configuration.
+      Only the Altus gateway excludes /auth/refresh from rate limiting. When
+      the PLM and Bee gateways rate-limit the refresh endpoint, users who
+      trigger a 401 cannot refresh their token, creating a cascading failure
+      that locks users out of the system.
+    fix_summary: >
+      Centralize rate limit configuration into a single shared YAML file.
+      All gateways load from the shared config. Include excluded_paths
+      (especially /auth/refresh) in the shared config.
+    lesson: >
+      Rate limiting the token refresh endpoint is a self-inflicted denial of
+      service — configuration consistency across gateways is not optional.
+
+  - id: "H-CP3"
+    title: "Cookie maxAge 15min but JWT expiresIn 30min — desynchronized TTLs"
+    severity: HIGH
+    pattern_ref: "cross-platform/cookie-jwt-ttl-desync"
+    freebsd_sa_ref: ""
+    location: "altus-gateway/internal/auth/cookie.go:34, altus-gateway/internal/auth/jwt.go:51"
+    description: >
+      Access token cookie set with maxAge=900 (15 minutes) but JWT signed
+      with expiresIn=30m (30 minutes). The browser deletes the cookie after
+      15 minutes while the JWT is still valid for another 15 minutes. Users
+      lose their session prematurely but the token can still be replayed if
+      intercepted. Conversely, if cookie maxAge > JWT expiry, the browser
+      sends an expired JWT, triggering unrecoverable 401 errors.
+    fix_summary: >
+      Define a single ACCESS_TOKEN_TTL constant referenced by both cookie
+      maxAge and JWT expiresIn. Cookie maxAge should equal or slightly
+      exceed JWT expiry to prevent premature session loss.
+    lesson: >
+      Cookie TTL and JWT TTL are two independent clocks controlled by
+      different systems (browser vs server). If they are not derived from
+      the same constant, they will eventually drift apart.
+
+  - id: "H-CP4"
+    title: "401 refresh catch block swallows error — user stuck in broken auth state"
+    severity: CRITICAL
+    pattern_ref: "cross-platform/incomplete-refresh-chain"
+    freebsd_sa_ref: ""
+    location: "altus-web/src/api/client.ts:23, plm-web/src/api/client.ts:31, bee-web/src/api/client.ts:19"
+    description: >
+      Axios 401 interceptors catch refresh errors and log them but do not
+      re-throw or redirect to login. When token refresh fails (expired
+      refresh token, revoked session), the user sees "authentication
+      required" on every page but has no way to recover because the
+      catch block swallows the error and the app never redirects to
+      the login page. The complete chain (401 → refresh → retry →
+      fail → redirect) is broken at the fail → redirect link.
+    fix_summary: >
+      Every catch block in a 401 handler must either re-throw the error
+      or redirect to the login page. Both are required: re-throw so the
+      calling code knows the request failed, redirect so the user can
+      re-authenticate.
+    lesson: >
+      A catch block that logs but does not re-throw is a silent failure.
+      In auth flows, silent failures are the worst outcome — the user
+      is stuck in a broken state with no error message and no recovery path.

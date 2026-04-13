@@ -42,6 +42,18 @@ func executeScan(targetPath string, format report.Format) error {
 		return fmt.Errorf("scan failed: %w", err)
 	}
 
+	// Phase 2: Run cross-file analysis (Tier 2 patterns).
+	crossScanner := scan.NewCrossFileScanner(scan.WithKnowledge(kb), scan.WithMaxTier(2))
+	crossResult, crossErr := crossScanner.Scan(ctx, targetPath)
+	if crossErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cross-file scan failed: %v\n", crossErr)
+	} else if len(crossResult.Findings()) > 0 {
+		allFindings := result.Findings()
+		allFindings = append(allFindings, crossResult.Findings()...)
+		result = scan.NewResult(allFindings, result.TargetDir(), result.PatternsUsed(), result.FilesScanned(), result.Duration())
+		fmt.Fprintf(os.Stderr, "Cross-file analysis found %d additional finding(s)\n", len(crossResult.Findings()))
+	}
+
 	reporter := report.New(format)
 	return reporter.Report(os.Stdout, result)
 }
